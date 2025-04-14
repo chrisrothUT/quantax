@@ -522,7 +522,7 @@ class Pfaffian(RefModel):
         F = self.F if self.F.ndim == 1 else jax.lax.complex(self.F[0], self.F[1])
 
         F_full = F[self.index]
-        F_full = F_full - F_full.T
+        F_full = (F_full - F_full.T)/2
 
         return F_full
 
