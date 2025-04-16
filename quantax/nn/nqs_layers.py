@@ -7,7 +7,7 @@ from .modules import NoGradLayer, RawInputLayer
 from ..symmetry import Symmetry, TransND, Identity
 from ..global_defs import get_lattice
 from ..utils import _triangularb_circularpad
-from ..sites import TriangularB
+from ..sites import TriangularB, Bilayer
 
 class ReshapeConv(NoGradLayer):
     """
@@ -31,7 +31,10 @@ class ReshapeConv(NoGradLayer):
         lattice = get_lattice()
         shape = lattice.shape
         if lattice.is_fermion:
-            shape = (shape[0] * 2,) + shape[1:]
+            if isinstance(lattice,Bilayer):
+                shape = (-1,) + shape[-2:]
+            else:
+                shape = (shape[0] * 2,) + shape[1:]
         x = x.reshape(shape)
         x = x.astype(self.dtype)
         return x
@@ -74,8 +77,17 @@ class Gconv(eqx.Module):
     def __init__(self, out_features, in_features, idxarray, npoint, layer0, key, dtype: jnp.dtype = jnp.float32):
 
         if layer0 == True:
-            nelems = 2*idxarray.shape[-1]
-            idxarray = idxarray[:,:2] % nelems
+
+            lattice = get_lattice()
+
+            if isinstance(lattice,Bilayer):
+                in_symm = 4
+            else:
+                in_symm = 2
+            
+            nelems = in_symm*idxarray.shape[-1]
+            
+            idxarray = idxarray[:,:in_symm] % nelems
             scale = (1/(in_features*nelems))**0.5
         else:
             nelems = npoint*idxarray.shape[-1]
@@ -90,7 +102,7 @@ class Gconv(eqx.Module):
         
         lattice = get_lattice()
 
-        x = x.reshape(1,-1,lattice.shape[1],lattice.shape[2])
+        x = x.reshape(1,-1,lattice.shape[-2],lattice.shape[-1])
 
         if isinstance(lattice,TriangularB):
             x = jax.vmap(_triangularb_circularpad)(x)

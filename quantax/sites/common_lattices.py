@@ -134,3 +134,28 @@ class TriangularB(Lattice):
         super().__init__(
             extent, basis_vectors, None, boundary, Nparticle, is_fermion, double_occ
         )
+
+class Bilayer(Lattice):
+    def __init__(
+        self,
+        extent: Union[int, Sequence[int]],
+        boundary: Union[int, Sequence[int]] = 1,
+        Nparticle: Union[None, int, Tuple[int, int]] = None,
+        is_fermion: bool = False,
+        double_occ: Optional[bool] = None,
+    ):
+        
+        if isinstance(extent, int):
+            extent = (2,extent,extent)
+        else:
+            extent = (2,) + extent
+
+        if isinstance(boundary, int):
+            boundary = (0,boundary,boundary)
+        else:
+            boundary = (0,) + boundary
+
+        basis_vectors = np.eye(len(extent), dtype=np.float64)
+        super().__init__(
+            extent, basis_vectors, None, boundary, Nparticle, is_fermion, double_occ
+        )

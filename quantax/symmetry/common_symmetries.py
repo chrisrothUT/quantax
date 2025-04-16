@@ -69,6 +69,20 @@ def SpinInverse(eigval: int = 1) -> Symmetry:
         return Z2Inversion(eigval)
 
 
+def BilayerFlip(eigval: int = 1) -> Symmetry:
+    if eigval == 1:
+        sector = 0
+    elif eigval == -1:
+        sector = 1
+
+    N = get_lattice().N
+
+    generator = np.arange(2*N).reshape(2,2,-1)
+    generator = generator[:,::-1].ravel()
+
+    return Symmetry(generator, sector)
+
+
 def ParticleHole(eigval: int = 1) -> Symmetry:
     """
     Particle-hole symmetry for fermion systems

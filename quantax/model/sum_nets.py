@@ -15,11 +15,11 @@ from ..nn import (
     ConvSymmetrize,
     Gconv,
 )
-from ..symmetry import Symmetry, Trans2D
+from ..symmetry import Symmetry, Trans2D, Translation
 from ..symmetry.symmetry import _reordering_perm
 from ..global_defs import get_lattice, is_default_cpl, get_subkeys
 from functools import partial
-from quantax.sites import Grid, Triangular, TriangularB
+from quantax.sites import Grid, Triangular, TriangularB, Bilayer
 from ..utils import Reshape_TriangularB, ReshapeTo_TriangularB
 
 class _ResBlock(eqx.Module):
@@ -221,13 +221,19 @@ def ResSumGconv(
     if np.issubdtype(dtype, np.complexfloating):
         raise ValueError("`ResSum` doesn't support complex dtypes.")
     
-    trans_symm = Trans2D()
 
     lattice = get_lattice()
     if isinstance(lattice, TriangularB):
         reshape = Reshape_TriangularB(dtype)
     else:
         reshape = ReshapeConv(dtype)
+
+
+    if isinstance(lattice,Bilayer):
+        trans_symm = Translation([0, 1, 0], 0) + Translation([0, 0, 1], 0)
+    else:
+        trans_symm = Trans2D()
+
 
     idxarray, npoint = compute_idxarray(pg_symm, trans_symm)
 
@@ -284,13 +290,13 @@ def compute_idxarray(pg_symm, trans_symm):
     perms = take(pg_perms,trans_perms)
     perms = perms.reshape(-1,perms.shape[-1])
         
-    npoint = len(perms)//(lattice.shape[1]*lattice.shape[2])        
+    npoint = len(perms)//(lattice.shape[-2]*lattice.shape[-1])    
 
-    perms = perms.reshape(npoint, lattice.shape[1],lattice.shape[2],-1)
+    perms = perms.reshape(npoint, lattice.shape[-2],lattice.shape[-1],-1)
     inv_perms = jnp.argsort(perms[:,0,0],-1)
 
     lattice = get_lattice()
-    if isinstance(lattice,Grid) and lattice.ndim == 2:
+    if isinstance(lattice,Grid) or isinstance(lattice,Bilayer): 
         mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
         mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])        
     elif isinstance(lattice,Triangular):

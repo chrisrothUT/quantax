@@ -14,4 +14,5 @@ from .common_symmetries import (
     Rotation,
     C4v,
     D6,
+    BilayerFlip,
 )

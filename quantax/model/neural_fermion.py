@@ -19,9 +19,10 @@ from .fermion_mf import (
 
 
 def _to_sub_term(x: jax.Array, sublattice: Tuple) -> jax.Array:
+
     remaining_dims = x.shape[1:]
-    x = x.reshape(get_lattice().shape[1:] + remaining_dims)
-    for axis, subl in enumerate(sublattice):
+    x = x.reshape(get_lattice().shape[-2:] + remaining_dims)
+    for axis, subl in enumerate(sublattice[-2:]):
         x = x.take(np.arange(subl), axis)
     x = x.reshape(-1, *remaining_dims)
     return x
@@ -72,6 +73,7 @@ def _jastrow_sub_symmetrize(
     trans_symm: Optional[Symmetry],
     sublattice: Optional[tuple],
 ) -> jax.Array:
+    
     if trans_symm is None:
         return jnp.mean(x_full) * x_sub[0]
     
@@ -80,6 +82,10 @@ def _jastrow_sub_symmetrize(
         new_shape = x_full.shape[:axis] + (-1, subl) + x_full.shape[axis + 1 :]
         x_full = x_full.reshape(new_shape)
         x_full = jnp.mean(x_full, axis)
+
+    if x_full.ndim == 3:
+        x_full = jnp.mean(x_full,0)
+    
     return _sub_symmetrize(x_full.flatten() * x_sub, s, trans_symm, sublattice)
 
 
@@ -289,7 +295,9 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
 
     def pairing_and_jastrow(self, x: jax.Array) -> jax.Array:
         N = get_sites().N
+
         x = x.reshape(-1, 2 * N)
+
         x_mf = x[: self.Nhidden]
         jastrow = x[self.Nhidden :]
         jastrow = jnp.mean(jastrow.reshape(-1, N), axis=0)
@@ -325,6 +333,7 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         return _jastrow_sub_symmetrize(jastrow, mf, s, self.trans_symm, self.sublattice)
 
     def __call__(self, x: jax.Array, s: jax.Array) -> jax.Array:
+
         x, jastrow = jax.vmap(self.pairing_and_jastrow, in_axes=1)(x)
 
         s_point = self.pg_symm.get_symm_spins(s) 
@@ -333,6 +342,9 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         x_symm = x_symm.swapaxes(1,2)
 
         psi = jax.vmap(jax.vmap(self.forward))(x_symm, s_symm)
+
+        print(jastrow.shape)
+        print(psi.shape)
 
         psi = jax.vmap(self.sub_symmetrize)(jastrow, psi, s_point)
 

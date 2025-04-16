@@ -1,6 +1,7 @@
 from .sites import Sites
 from .lattice import Lattice
 from .common_lattices import (
+    Bilayer,
     Grid,
     Chain,
     Square,
