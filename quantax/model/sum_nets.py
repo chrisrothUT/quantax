@@ -15,8 +15,7 @@ from ..nn import (
     ConvSymmetrize,
     Gconv,
 )
-from ..symmetry import Symmetry, Trans2D
-from ..symmetry.symmetry import _reordering_perm
+from ..symmetry import Symmetry, Trans2D, SpinInverse
 from ..global_defs import get_lattice, is_default_cpl, get_subkeys
 from functools import partial
 from quantax.sites import Grid, Triangular, TriangularB
@@ -189,8 +188,11 @@ def ResSumGconv(
     nblocks: int,
     channels: int,
     pg_symm: Symmetry,
+    mask1: Optional[jax.Array] = None,
+    mask2: Optional[jax.Array] = None,
     final_activation: Optional[Callable] = None,
     project: bool = True,
+    spin_parity: bool = True,
     dtype: jnp.dtype = jnp.float32,
 ):
     """
@@ -221,6 +223,9 @@ def ResSumGconv(
     if np.issubdtype(dtype, np.complexfloating):
         raise ValueError("`ResSum` doesn't support complex dtypes.")
     
+    if spin_parity == True:
+        pg_symm = pg_symm + SpinInverse()
+
     trans_symm = Trans2D()
 
     lattice = get_lattice()
@@ -229,9 +234,9 @@ def ResSumGconv(
     else:
         reshape = ReshapeConv(dtype)
 
-    idxarray, npoint = compute_idxarray(pg_symm, trans_symm)
+    idxarray, npoint = compute_idxarray(pg_symm, trans_symm, mask1, mask2)
 
-    embedding = Gconv(channels,1,idxarray,npoint,True,get_subkeys(),dtype)
+    embedding = Gconv(channels,1,idxarray,npoint,True,get_subkeys(),spin_parity,dtype)
 
     blocks = [
         _ResBlockGconv(channels, idxarray, npoint, i, dtype)
@@ -263,13 +268,12 @@ def ResSumGconv(
         layers.append(output_transpose)
         layers.append(ConvSymmetrize(trans_symm + pg_symm))
     else:
-        perm = _reordering_perm(pg_symm, trans_symm)
-        reordering_layer = eqx.nn.Lambda(lambda x: x[:,perm].reshape(channels,npoint,-1))
-        layers.append(reordering_layer)
+        layers.append(ReorderingLayer(pg_symm, trans_symm))
+        layers.append(eqx.nn.Lambda(lambda x: x.reshape(channels,npoint,-1)))
 
     return Sequential(layers, holomorphic=False)
 
-def compute_idxarray(pg_symm, trans_symm):
+def compute_idxarray(pg_symm, trans_symm, mask1, mask2):
     
     lattice = get_lattice()
 
@@ -289,18 +293,19 @@ def compute_idxarray(pg_symm, trans_symm):
     perms = perms.reshape(npoint, lattice.shape[1],lattice.shape[2],-1)
     inv_perms = jnp.argsort(perms[:,0,0],-1)
 
-    lattice = get_lattice()
-    if isinstance(lattice,Grid) and lattice.ndim == 2:
-        mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
-        mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])        
-    elif isinstance(lattice,Triangular):
-        mask1 = jnp.asarray([-1,-1,0,0,0,1,1])
-        mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
-    elif isinstance(lattice,TriangularB):
-        mask1 = jnp.asarray([-1,-2,1,0,-1,2,1])
-        mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
-    else:
-        raise ValueError('No GCNN defined for this lattice type')
+    if mask1 is None or mask2 is None:
+        lattice = get_lattice()
+        if isinstance(lattice,Grid) and lattice.ndim == 2:
+            mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
+            mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])        
+        elif isinstance(lattice,Triangular):
+            mask1 = jnp.asarray([-1,-1,0,0,0,1,1])
+            mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
+        elif isinstance(lattice,TriangularB):
+            mask1 = jnp.asarray([-1,-2,1,0,-1,2,1])
+            mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
+        else:
+            raise ValueError('No GCNN defined for this lattice type')
 
     perms = perms[:,mask1,mask2]
     
@@ -314,10 +319,51 @@ def compute_idxarray(pg_symm, trans_symm):
             
             k = jnp.argmin(jnp.sum(jnp.abs(comp_perm - perms),-1))
             if jnp.amin(jnp.sum(jnp.abs(comp_perm - perms),-1)) != 0:
-                print('false',flush=True)
+                raise ValueError('Kernel is not symmetric with respect to point group symmetries')
 
             idxarray = idxarray.at[i,j].set(k.astype(jnp.int16))
 
     idxarray = idxarray.reshape(npoint,npoint,len(mask1))
 
     return idxarray, npoint
+
+class ReorderingLayer(eqx.Module):
+    pg_symm: Symmetry
+    trans_symm: Symmetry
+    perm: jax.Array
+
+    def __init__(
+        self,
+        pg_symm: Symmetry,
+        trans_symm: Symmetry,
+        ):
+
+        self.pg_symm = pg_symm
+        self.trans_symm = trans_symm
+        self.perm = _reordering_perm(pg_symm, trans_symm)
+    
+    def __call__(self, x):
+
+        return x[:,self.perm]
+
+
+def _reordering_perm(pg_symm, trans_symm):
+    pg_perms = pg_symm._perm
+    trans_perms = trans_symm._perm
+
+    symm = pg_symm + trans_symm
+    all_perms = symm._perm
+
+    T = len(trans_perms)
+    P = len(pg_perms)
+    full_perm = jnp.zeros([len(all_perms)], dtype=jnp.int16)
+    for i in range(P):
+        for j in range(T):
+            perm1 = trans_perms[j]
+            perm2 = pg_perms[i]
+
+            m = jnp.argmax(jnp.all(perm1[perm2][None] == all_perms, axis=-1))
+
+            full_perm = full_perm.at[m].set(i * T + j)
+
+    return full_perm

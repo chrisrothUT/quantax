@@ -248,6 +248,7 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
     pg_symm: Symmetry
     sublattice: Tuple[int, ...]
     scale_layer: Scale
+    scale_pairing: Scale
     exp_layer: Exp
 
     def __init__(
@@ -262,13 +263,13 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         sites = get_sites()
         N = sites.N
         self.Nhidden = Nhidden
-        Ntotal = sites.Ntotal + Nhidden
+        Ntotal = sites.Ntotal 
 
         index, nparams = _get_pfaffian_indices(sublattice, 2 * N)
         self.index = index
 
-        #F_hidden = jnp.zeros((Nhidden*(Nhidden-1)//2),dtype=dtype)
-        F_hidden = jr.normal(get_subkeys(),(Nhidden*(Nhidden-1)//2),dtype=dtype)
+        F_hidden = jnp.zeros((Nhidden*(Nhidden-1)//2),dtype=dtype)
+        #F_hidden = jr.normal(get_subkeys(),(Nhidden*(Nhidden-1)//2),dtype=dtype)
 
         is_dtype_cpl = jnp.issubdtype(dtype, jnp.complexfloating)
         if is_default_cpl() and not is_dtype_cpl:
@@ -285,6 +286,8 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         self.sublattice = sublattice
 
         self.scale_layer = Scale(np.sqrt(np.e / Ntotal))
+        self.scale_pairing = Scale(np.sqrt(np.e / Ntotal)/Nhidden)
+
         self.exp_layer = Exp()
 
     def pairing_and_jastrow(self, x: jax.Array) -> jax.Array:
@@ -293,7 +296,7 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         x_mf = x[: self.Nhidden]
         jastrow = x[self.Nhidden :]
         jastrow = jnp.mean(jastrow.reshape(-1, N), axis=0)
-        return self.scale_layer(x_mf), self.exp_layer(jastrow)
+        return x_mf, self.exp_layer(jastrow)
 
     @property
     def F_full(self) -> jax.Array:
@@ -314,7 +317,7 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         F_full = jnp.zeros((Nhidden, Nhidden), F_hidden.dtype)
         F_full = array_set(F_full, F_hidden, jnp.triu_indices(Nhidden, 1))
         F_full = (F_full - F_full.T)/2
-        return self.scale_layer(F_full)
+        return self.scale_pairing(F_full)
 
     def get_sublattice_spins(self, x: jax.Array) -> jax.Array:
         return _get_sublattice_spins(x, self.trans_symm, self.sublattice)
@@ -408,9 +411,14 @@ class HiddenPfaffian(Sequential, RefModel):
             pairing_net = _ConstantPairing(Nhidden, dtype)
 
         self.Nhidden = _get_default_Nhidden(pairing_net) if Nhidden is None else Nhidden
-        self.trans_symm = trans_symm
+        
+        pairing_net.layers[-2]
+        if trans_symm is None and hasattr(pairing_net.layers[-2],'trans_symm'):
+            self.trans_symm = pairing_net.layers[-2].trans_symm
+        else:
+            self.trans_symm = trans_symm
 
-        if trans_symm is None:
+        if self.trans_symm is None:
             self.sublattice = None
         elif sublattice is None:
             self.sublattice = get_lattice().shape[1:]
@@ -418,8 +426,12 @@ class HiddenPfaffian(Sequential, RefModel):
             self.sublattice = sublattice
 
         if pg_symm is None:
-            self.pg_symm = Identity()
-            reshape_layer = eqx.nn.Lambda(lambda x: x[:,None])
+            if hasattr(pairing_net.layers[-2],'pg_symm'):
+                self.pg_symm = pairing_net.layers[-2].pg_symm
+                reshape_layer = eqx.nn.Lambda(lambda x: x)
+            else:
+                self.pg_symm = Identity()
+                reshape_layer = eqx.nn.Lambda(lambda x: x[:,None])
         else:
             self.pg_symm = pg_symm
             reshape_layer = eqx.nn.Lambda(lambda x: x)

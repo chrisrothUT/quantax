@@ -71,11 +71,18 @@ class Gconv(eqx.Module):
     weight: jax.Array
     idxarray: jax.Array
 
-    def __init__(self, out_features, in_features, idxarray, npoint, layer0, key, dtype: jnp.dtype = jnp.float32):
+    def __init__(self, out_features, in_features, idxarray, npoint, layer0, key, spin_parity, dtype: jnp.dtype = jnp.float32):
 
         if layer0 == True:
-            nelems = 2*idxarray.shape[-1]
-            idxarray = idxarray[:,:2] % nelems
+            if spin_parity == True:
+                npoint = 2
+            else:
+                npoint = 1
+            
+            in_features = 2*in_features//npoint
+
+            nelems = npoint*idxarray.shape[-1]
+            idxarray = idxarray[:,:npoint] % nelems
             scale = (1/(in_features*nelems))**0.5
         else:
             nelems = npoint*idxarray.shape[-1]
@@ -92,20 +99,21 @@ class Gconv(eqx.Module):
 
         x = x.reshape(1,-1,lattice.shape[1],lattice.shape[2])
 
-        if isinstance(lattice,TriangularB):
-            x = jax.vmap(_triangularb_circularpad)(x)
-        else:
-            x = jnp.concatenate((x[:,:,-1:],x,x[:,:,:1]),axis=-2)
-            x = jnp.concatenate((x[:,:,:,-1:],x,x[:,:,:,:1]),axis=-1)
-
         weight = self.weight[...,self.idxarray]
 
         if weight.shape[-1] == 9:
             weight = weight.reshape(*weight.shape[:-1],3,3)
-        else:
+            x = jnp.concatenate((x[:,:,-1:],x,x[:,:,:1]),axis=-2)
+            x = jnp.concatenate((x[:,:,:,-1:],x,x[:,:,:,:1]),axis=-1)
+        elif weight.shape[-1] == 15:
+            weight = weight.reshape(*weight.shape[:-1],5,3)
+            x = jnp.concatenate((x[:,:,-2:],x,x[:,:,:2]),axis=-2)
+            x = jnp.concatenate((x[:,:,:,-1:],x,x[:,:,:,:1]),axis=-1)
+        elif weight.shape[-1] == 7:
             zeros = jnp.zeros_like(weight[...,:1])
             weight = jnp.concatenate((zeros,weight,zeros),-1)
             weight = weight.reshape(*weight.shape[:-1],3,3)
+            x = jax.vmap(_triangularb_circularpad)(x)
 
         weight = weight.transpose(0,2,1,3,4,5)
         weight = weight.reshape(weight.shape[0]*weight.shape[1],-1,weight.shape[4],weight.shape[5])

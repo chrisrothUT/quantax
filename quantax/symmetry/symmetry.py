@@ -378,24 +378,3 @@ class Symmetry:
         )
         return new_symm
 
-
-def _reordering_perm(pg_symm, trans_symm):
-    pg_perms = pg_symm._perm
-    trans_perms = trans_symm._perm
-
-    symm = pg_symm + trans_symm
-    all_perms = symm._perm
-
-    T = len(trans_perms)
-    P = len(pg_perms)
-    full_perm = jnp.zeros([len(all_perms)], dtype=jnp.int16)
-    for i in range(P):
-        for j in range(T):
-            perm1 = trans_perms[j]
-            perm2 = pg_perms[i]
-
-            m = jnp.argmax(jnp.all(perm1[perm2][None] == all_perms, axis=-1))
-
-            full_perm = full_perm.at[m].set(i * T + j)
-
-    return full_perm

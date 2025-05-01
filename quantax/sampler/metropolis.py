@@ -556,3 +556,119 @@ class HopExchangeMix(Metropolis):
         )
 
         return new_spins, propose_prob
+
+class HopExchangeFlip(Metropolis):
+    """
+    Generate Monte Carlo samples by exchanging neighbor spins or fermions.
+    """
+
+    def __init__(
+        self,
+        state: State,
+        nsamples: int,
+        exchange_prob: float,
+        hop_prob: float,
+        reweight: float = 2.0,
+        thermal_steps: Optional[int] = None,
+        sweep_steps: Optional[int] = None,
+        initial_spins: Optional[jax.Array] = None,
+        n_neighbor: Union[int, Sequence[int]] = 1,
+    ):
+        """
+        :param state:
+            The state used for computing the wave function and probability.
+            Since exchanging neighbor spins doesn't change the total Sz,
+            the state must have `quantax.symmetry.ParticleConserve` symmetry to specify
+            the symmetry sector.
+
+        :param nsamples:
+            Number of samples generated per iteration.
+            It should be a multiple of the total number of machines to allow samples
+            to be equally distributed on different machines.
+
+        :param reweight:
+            The reweight factor n defining the sample probability :math:`|\psi|^n`,
+            default to 2.0.
+
+        :param thermal_steps:
+            The number of thermalization steps in the beginning of each Markov chain,
+            default to be 20 * fock state length.
+
+        :param sweep_steps:
+            The number of steps for generating new samples, default to be 2 * fock state length.
+
+        :param initial_spins:
+            The initial spins for every Markov chain before the thermalization steps,
+            default to be random spins.
+
+        :param n_neighbor:
+            The neighbors to be considered by exchanges, default to nearest neighbors.
+        """
+        sites = get_sites()
+        if sites.Nparticle is None:
+            raise ValueError("`Nparticle` should be specified for NeighborExchange.")
+
+        if exchange_prob + hop_prob > 1:
+            raise ValueError("Probabilities should add to number less than 1")
+
+        n_neighbor = [n_neighbor] if isinstance(n_neighbor, int) else n_neighbor
+        neighbors = sites.get_neighbor(n_neighbor)
+        neighbors = np.concatenate(neighbors, axis=0)
+        if sites.is_fermion:
+            neighbors = np.concatenate([neighbors, neighbors + sites.N], axis=0)
+        self._neighbors = jnp.asarray(neighbors, dtype=jnp.uint16)
+        self.exchange_prob = exchange_prob
+        self.hop_prob = hop_prob
+
+        super().__init__(
+            state, nsamples, reweight, thermal_steps, sweep_steps, initial_spins
+        )
+
+    @property
+    def nflips(self) -> int:
+        return 4
+
+    @partial(jax.jit, static_argnums=0)
+    def _propose(
+        self, key: jax.Array, old_spins: jax.Array
+    ) -> Tuple[jax.Array, jax.Array]:
+        nsamples = old_spins.shape[0]
+        n_total_neighbors = self._neighbors.shape[0]
+        n_up_neighbors = n_total_neighbors//2
+        N = get_sites().N
+
+        key, key2, key3, key4 = jr.split(key, 4)
+
+        nexchange = int(self.exchange_prob*nsamples)
+        nhop = int(self.hop_prob*nsamples)
+        nflip = nsamples - nhop - nexchange
+
+        exchange, hop, flip = jnp.split(jr.permutation(key,nsamples),[nexchange,nexchange+nhop,])
+        exchange = jnp.tile(exchange, (4, 1)).T
+        hop = jnp.tile(hop, (2, 1)).T
+        flip = jnp.tile(flip, (2, 1)).T
+
+        #exchange rule
+        pos = jr.choice(key2, n_up_neighbors, (nexchange,))
+        pairs = jnp.concatenate((self._neighbors[pos],self._neighbors[pos]+N),-1)              
+        rev_pairs = pairs[:,(1,0,3,2)]
+        s_exchange = old_spins[exchange, rev_pairs]       
+        new_spins = old_spins.at[exchange, pairs].set(s_exchange)
+
+        #hop rule
+        pos = jr.choice(key3, n_total_neighbors, (nhop,))
+        pairs = self._neighbors[pos]       
+        s_exchange = new_spins[hop, pairs[:, ::-1]]
+        new_spins = new_spins.at[hop, pairs].set(s_exchange)
+
+        #flip rule
+        pos = jr.choice(key4, N, (nflip,))[:,None]
+        pairs = jnp.concatenate((pos,pos+N),-1)
+        s_exchange = new_spins[flip, pairs[:, ::-1]]
+        new_spins = new_spins.at[flip, pairs].set(s_exchange)
+
+        propose_prob = jnp.ones(
+            nsamples, dtype=get_default_dtype(), device=get_global_sharding()
+        )
+
+        return new_spins, propose_prob
