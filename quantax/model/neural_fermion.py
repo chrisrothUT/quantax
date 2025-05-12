@@ -240,7 +240,6 @@ class _ConstantPairing(eqx.Module):
 
 class _FullOrbsLayerPfaffian(RawInputLayer):
     F: jax.Array
-    F_hidden: jax.Array
     index: jax.Array
     Nhidden: int
     holomorphic: bool
@@ -268,16 +267,11 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         index, nparams = _get_pfaffian_indices(sublattice, 2 * N)
         self.index = index
 
-        F_hidden = jnp.zeros((Nhidden*(Nhidden-1)//2),dtype=dtype)
-        #F_hidden = jr.normal(get_subkeys(),(Nhidden*(Nhidden-1)//2),dtype=dtype)
-
         is_dtype_cpl = jnp.issubdtype(dtype, jnp.complexfloating)
         if is_default_cpl() and not is_dtype_cpl:
             self.F = jr.normal(get_subkeys(), (2, nparams), dtype)
-            self.F_hidden = jnp.stack([F_hidden.real, F_hidden.imag], axis=0)
         else:
             self.F = jr.normal(get_subkeys(), (nparams), dtype)
-            self.F_hidden = F_hidden
 
         self.holomorphic = is_default_cpl() and is_dtype_cpl
         self.trans_symm = trans_symm
@@ -290,12 +284,10 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
 
         self.exp_layer = Exp()
 
-    def pairing_and_jastrow(self, x: jax.Array) -> jax.Array:
+    def pairing(self, x: jax.Array) -> jax.Array:
         N = get_sites().N
         x = x.reshape(-1, 2 * N)
-        x_mf = x[: self.Nhidden]
-        jastrow = x[self.Nhidden :]
-        jastrow = jnp.mean(jastrow.reshape(-1, N), axis=0)
+
         return x_mf, self.exp_layer(jastrow)
 
     @property

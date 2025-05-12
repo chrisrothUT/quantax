@@ -76,7 +76,8 @@ class Lattice(Sites):
             grid = np.arange(ext, dtype=float)
             grid = np.einsum("i,j->ji", basis, grid)
             coord = np.expand_dims(coord, -2) + grid
-        coord = np.expand_dims(coord, -2) + self._site_offsets
+
+        coord = coord.reshape(-1, ndim)[None] + self._site_offsets[:,None]
         coord = coord.reshape(-1, ndim)
 
         super().__init__(N, Nparticle, is_fermion, double_occ, coord)
