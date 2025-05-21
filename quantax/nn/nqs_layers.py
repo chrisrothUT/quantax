@@ -7,7 +7,7 @@ from .modules import NoGradLayer, RawInputLayer
 from ..symmetry import Symmetry, TransND, Identity
 from ..global_defs import get_lattice
 from ..utils import _triangularb_circularpad
-from ..sites import TriangularB
+from ..sites import TriangularB, SquareB
 
 class ReshapeConv(NoGradLayer):
     """
@@ -74,7 +74,7 @@ class Gconv(eqx.Module):
     def __init__(self, out_features, in_features, idxarray, npoint, layer0, key, spin_parity, dtype: jnp.dtype = jnp.float32):
 
         if layer0 == True:
-            if spin_parity == True:
+            if spin_parity == 1 or spin_parity == -1:
                 npoint = 2
             else:
                 npoint = 1
@@ -103,8 +103,11 @@ class Gconv(eqx.Module):
 
         if weight.shape[-1] == 9:
             weight = weight.reshape(*weight.shape[:-1],3,3)
-            x = jnp.concatenate((x[:,:,-1:],x,x[:,:,:1]),axis=-2)
-            x = jnp.concatenate((x[:,:,:,-1:],x,x[:,:,:,:1]),axis=-1)
+            if isinstance(lattice, SquareB):
+                x = jax.vmap(_triangularb_circularpad)(x)
+            else:
+                x = jnp.concatenate((x[:,:,-1:],x,x[:,:,:1]),axis=-2)
+                x = jnp.concatenate((x[:,:,:,-1:],x,x[:,:,:,:1]),axis=-1)
         elif weight.shape[-1] == 15:
             weight = weight.reshape(*weight.shape[:-1],5,3)
             x = jnp.concatenate((x[:,:,-2:],x,x[:,:,:2]),axis=-2)

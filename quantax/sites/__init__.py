@@ -8,6 +8,7 @@ from .common_lattices import (
     Pyrochlore,
     Triangular,
     TriangularB,
+    SquareB,
 )
 
 from .cluster import Cluster

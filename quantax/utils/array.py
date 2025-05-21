@@ -12,7 +12,7 @@ from jax.experimental.multihost_utils import (
     host_local_array_to_global_array,
 )
 from .sharding import get_global_sharding, get_replicate_sharding
-from ..sites import TriangularB
+from ..sites import TriangularB, SquareB
 from ..global_defs import get_lattice
 import equinox as eqx
 from typing import Optional
@@ -128,7 +128,7 @@ class Reshape_TriangularB(eqx.Module):
     def __init__(self, dtype: jnp.dtype = jnp.float32):
         self.dtype = dtype
         lattice = get_lattice()
-        if not isinstance(lattice, TriangularB):
+        if not (isinstance(lattice, TriangularB) or isinstance(lattice, SquareB)):
             raise ValueError("The current lattice is not `TriangularB`.")
 
         permutation = np.arange(lattice.N, dtype=np.uint16)
@@ -160,7 +160,7 @@ class ReshapeTo_TriangularB(eqx.Module):
     def __init__(self, dtype: jnp.dtype = jnp.float32):
         self.dtype = dtype
         lattice = get_lattice()
-        if not isinstance(lattice, TriangularB):
+        if not (isinstance(lattice, TriangularB) or isinstance(lattice, SquareB)):
             raise ValueError("The current lattice is not `TriangularB`.")
 
         permutation = np.arange(lattice.N, dtype=np.uint16)

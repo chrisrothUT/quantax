@@ -451,6 +451,15 @@ def _low_rank_update_pfaffian(
         rat = pfa_update(old_inv, update, update_idx, return_inv)
         return old_psi * rat * parity
 
+def in_unit_cell(ind,tol=1e-5):
+    c1 = ind[0] > -tol
+    c2 = ind[0] < 1-tol
+    c3 = ind[1] > -tol
+    c4 = ind[1] < 1-tol
+    
+    return c1*c2*c3*c4
+  
+
 def _get_pfaffian_indices(sublattice, N):
     if sublattice is None:
         nparams = N * (N - 1) // 2
@@ -461,36 +470,78 @@ def _get_pfaffian_indices(sublattice, N):
         c = lattice.shape[0]
 
         ns = N // np.prod(lattice.shape)
-        lattice_shape = (ns,) + lattice.shape
-        sublattice = (ns, c) + sublattice
+        lattice_shape = lattice.shape[1:]
 
-        index = np.ones((N, N), dtype=np.uint32)
+        ncells = N//(ns*c)
 
-        index = index.reshape(lattice_shape + lattice_shape)
-        for axis, lsub in enumerate(sublattice):
-            if axis > 1:
-                index = np.take(index, range(lsub), axis)
+        index = lattice.coord @ np.linalg.inv(lattice.basis_vectors)
 
-        nparams = np.sum(index).item()
-        index[index == 1] = np.arange(nparams)
+        sublattice = np.asarray(sublattice)
+        if sublattice.ndim == 1:
+            sublattice = np.diag(sublattice)
 
-        for axis, (l, lsub) in enumerate(zip(lattice_shape[2:], sublattice[2:])):
-            mul = l // lsub
-            translated_axis = lattice.ndim + axis + 4
+        index = index @ np.linalg.inv(sublattice) 
 
-            index = [np.roll(index, i * lsub, translated_axis) for i in range(mul)]
-            index = np.concatenate(index, axis=axis + 2)
+        index = jax.vmap(in_unit_cell)(index).astype(int)
 
-        index = index.reshape(N, N)
+        nparams = np.sum(index).astype(int)
 
-    return index, nparams
+        index = jnp.where(index==0,np.nan,index)
 
+        sub_inds = jnp.argwhere(index == 1).ravel()
+
+        index = index.at[sub_inds].set(jnp.arange(nparams))
+
+        full_index = index[None] + nparams*jnp.arange(ncells)[:,None]
+
+        index = index.reshape(lattice_shape)
+        index = jnp.where(jnp.isnan(index),0,index + 1)
+
+        full_index = full_index.reshape(lattice_shape + lattice_shape)
+        full_index = jnp.where(jnp.isnan(full_index),0,full_index)
+
+        all_axes = np.arange(2*len(sublattice))
+        sub_axes = np.arange(len(sublattice))
+
+        for axis, (l, lsub) in enumerate(zip(lattice_shape, sublattice)):
+            mul = l // lsub[axis]
+
+            repeat_sub = np.concatenate((lsub,lsub))
+
+            total_index = 0
+            total_jastrow_index = 0
+
+            for i in range(mul):
+                
+                total_index = total_index + jnp.roll(full_index, i*repeat_sub,all_axes)
+                roll = jnp.roll(index,i*lsub,sub_axes) 
+                total_jastrow_index = total_jastrow_index + roll + jnp.where(roll > 0, i*jnp.amax(roll),0)
+
+            full_index = total_index
+            index = total_jastrow_index
+
+        full_index = full_index.reshape(ncells, ncells)
+
+        nparams = nparams*np.prod(lattice_shape)
+
+        full_index = full_index[None,:,None]
+        r = nparams*np.arange(ns*c)
+        full_index = full_index + ns*c*r[:,None,None,None] 
+        full_index = full_index + r[None,None,:,None]
+        nparams = nparams*(ns*c)**2
+        nparams = nparams.item()
+
+        full_index = np.asarray(full_index.reshape(N,N)).astype(np.uint32)
+        sub_inds = np.asarray(sub_inds).astype(np.uint32)
+        index = np.argsort(np.asarray(index).astype(np.uint32).ravel() - 1)
+
+    return full_index, index, sub_inds, nparams
 
 class Pfaffian(RefModel):
     F: jax.Array
     index: jax.Array
     holomorphic: bool
-    sublattice: Optional[tuple] = eqx.field(static=True)
+    sublattice: jax.Array = eqx.field(static=True)
 
     def __init__(
         self, sublattice: Optional[tuple] = None, dtype: jnp.dtype = jnp.float64
@@ -504,7 +555,7 @@ class Pfaffian(RefModel):
 
         is_dtype_cpl = jnp.issubdtype(dtype, jnp.complexfloating)
 
-        index, nparams = _get_pfaffian_indices(sublattice, 2 * N)
+        index, _, _, nparams = _get_pfaffian_indices(sublattice, 2 * N)
 
         self.index = index
         shape = (nparams,)
@@ -515,6 +566,10 @@ class Pfaffian(RefModel):
 
         self.F = jr.normal(get_subkeys(), shape, dtype) * scale
         self.holomorphic = is_default_cpl() and is_dtype_cpl
+        sublattice = jnp.asarray(sublattice)
+        if sublattice.ndim == 1:
+            sublattice = jnp.diag(sublattice)
+        
         self.sublattice = sublattice
 
     @property

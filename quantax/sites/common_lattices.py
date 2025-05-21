@@ -44,6 +44,30 @@ def Square(
     """2D square lattice"""
     return Grid([L, L], boundary, Nparticle, is_fermion, double_occ)
 
+class SquareB(Lattice):
+
+    def __init__(
+        self,
+        L: int,
+        boundary: Union[int, Sequence[int]] = 1,
+        Nparticle: Union[None, int, Tuple[int, int]] = None,
+        is_fermion: bool = False,
+        double_occ: Optional[bool] = None,
+    ):
+        
+        basis_vectors=((1,0),(1,1))
+        extent=(2*L,L)
+        
+        super().__init__(
+            extent,
+            basis_vectors,
+            None,
+            boundary,
+            Nparticle,
+            is_fermion,
+            double_occ,
+        )
+
 
 def Cube(
     L: int,

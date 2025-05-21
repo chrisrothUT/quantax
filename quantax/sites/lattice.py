@@ -47,6 +47,7 @@ class Lattice(Sites):
         """
         ndim = len(extent)
         self._basis_vectors = np.asarray(basis_vectors, dtype=float)
+        self._extent = np.asarray(extent, dtype=float)
         if site_offsets is None:
             self._site_offsets = np.zeros([1, ndim], dtype=float)
         else:
@@ -99,6 +100,10 @@ class Lattice(Sites):
     def basis_vectors(self) -> np.ndarray:
         """Basis vectors of the lattice"""
         return self._basis_vectors
+
+    @property
+    def coordinate_extent(self) -> np.ndarray:
+        return self._extent[:,None]*self._basis_vectors
 
     @property
     def site_offsets(self) -> np.ndarray:

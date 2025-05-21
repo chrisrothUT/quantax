@@ -18,7 +18,7 @@ from ..nn import (
 from ..symmetry import Symmetry, Trans2D, SpinInverse
 from ..global_defs import get_lattice, is_default_cpl, get_subkeys
 from functools import partial
-from quantax.sites import Grid, Triangular, TriangularB
+from quantax.sites import Grid, Triangular, TriangularB, SquareB
 from ..utils import Reshape_TriangularB, ReshapeTo_TriangularB
 
 class _ResBlock(eqx.Module):
@@ -192,7 +192,7 @@ def ResSumGconv(
     mask2: Optional[jax.Array] = None,
     final_activation: Optional[Callable] = None,
     project: bool = True,
-    spin_parity: bool = True,
+    spin_parity: int = 1,
     dtype: jnp.dtype = jnp.float32,
 ):
     """
@@ -223,13 +223,13 @@ def ResSumGconv(
     if np.issubdtype(dtype, np.complexfloating):
         raise ValueError("`ResSum` doesn't support complex dtypes.")
     
-    if spin_parity == True:
-        pg_symm = pg_symm + SpinInverse()
+    if spin_parity == 1 or spin_parity == -1:
+        pg_symm = pg_symm + SpinInverse(spin_parity)
 
     trans_symm = Trans2D()
 
     lattice = get_lattice()
-    if isinstance(lattice, TriangularB):
+    if isinstance(lattice, TriangularB) or isinstance(lattice, SquareB):
         reshape = Reshape_TriangularB(dtype)
     else:
         reshape = ReshapeConv(dtype)
@@ -247,7 +247,7 @@ def ResSumGconv(
     layers = [reshape,embedding,*blocks, scale]
 
     layers.append(eqx.nn.Lambda(lambda x: jnp.squeeze(x)))
-    if isinstance(lattice, TriangularB):
+    if isinstance(lattice, TriangularB) or isinstance(lattice, SquareB):
         layers.append(ReshapeTo_TriangularB(dtype))
 
     if is_default_cpl():
@@ -299,11 +299,14 @@ def compute_idxarray(pg_symm, trans_symm, mask1, mask2):
             mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
             mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])        
         elif isinstance(lattice,Triangular):
-            mask1 = jnp.asarray([-1,-1,0,0,0,1,1])
+            mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
             mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
         elif isinstance(lattice,TriangularB):
             mask1 = jnp.asarray([-1,-2,1,0,-1,2,1])
             mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
+        elif isinstance(lattice,SquareB):
+            mask1 = jnp.asarray([0,-1,-2,1,0,-1,2,1,0])
+            mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])
         else:
             raise ValueError('No GCNN defined for this lattice type')
 
