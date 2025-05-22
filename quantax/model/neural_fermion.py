@@ -235,16 +235,16 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
     F: jax.Array
     F_hidden: jax.Array
     index: jax.Array
-    sub_inds: jax.Array 
-    jast_inds: jax.Array 
     Nhidden: int
     holomorphic: bool
     trans_symm: Symmetry
     pg_symm: Symmetry
+    sublattice: Tuple[int, ...]
     scale_layer: Scale
     scale_pairing: Scale
-    sublattice: Tuple[int]
     exp_layer: Exp
+    sub_inds: jax.Array = eqx.field(static=True)
+    jast_inds: jax.Array = eqx.field(static=True)
 
     def __init__(
         self,
@@ -420,10 +420,6 @@ class BackflowPfaffian(Sequential, RefModel):
             self.sublattice = get_lattice().shape[1:]
         else:
             self.sublattice = sublattice
-
-        self.sublattice = jnp.asarray(self.sublattice)
-        if self.sublattice.ndim == 1:
-            self.sublattice = jnp.diag(self.sublattice)
         
         if pg_symm is None:
             if hasattr(pairing_net.layers[-2],'pg_symm'):

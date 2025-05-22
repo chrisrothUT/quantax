@@ -97,7 +97,7 @@ class Gconv(eqx.Module):
         
         lattice = get_lattice()
 
-        x = x.reshape(1,-1,lattice.shape[1],lattice.shape[2])
+        x = x.reshape(1,-1,*lattice.shape[1:])
 
         weight = self.weight[...,self.idxarray]
 
@@ -117,10 +117,23 @@ class Gconv(eqx.Module):
             weight = jnp.concatenate((zeros,weight,zeros),-1)
             weight = weight.reshape(*weight.shape[:-1],3,3)
             x = jax.vmap(_triangularb_circularpad)(x)
+        elif weight.shape[-1] == 18:
+            weight = weight.reshape(*weight.shape[:-1],2,3,3)
+            x = jnp.concatenate((x[:,:,-1:],x),axis=-3)
+            x = jnp.concatenate((x[:,:,:,-1:],x,x[:,:,:,:1]),axis=-2)
+            x = jnp.concatenate((x[:,:,:,:,-1:],x,x[:,:,:,:,:1]),axis=-1)
 
-        weight = weight.transpose(0,2,1,3,4,5)
-        weight = weight.reshape(weight.shape[0]*weight.shape[1],-1,weight.shape[4],weight.shape[5])
+        if lattice.ndim == 2:
+            weight = weight.transpose(0,2,1,3,4,5)
+            weight = weight.reshape(weight.shape[0]*weight.shape[1],-1,weight.shape[4],weight.shape[5])
 
-        x = x.astype(weight)
+            x = x.astype(weight)
         
-        return jax.lax.conv(x,weight,(1,1),'Valid')
+            return jax.lax.conv(x,weight,(1,1),'Valid')
+        else:
+            weight = weight.transpose(0,2,1,3,4,5,6)
+            weight = weight.reshape(weight.shape[0]*weight.shape[1],-1,weight.shape[4],weight.shape[5],weight.shape[6])
+
+            x = x.astype(weight)
+            
+            return jax.lax.conv(x,weight,(1,1,1),'Valid')

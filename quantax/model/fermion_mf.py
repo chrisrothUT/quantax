@@ -466,6 +466,10 @@ def _get_pfaffian_indices(sublattice, N):
         index = np.zeros((N, N), dtype=np.uint32)
         index[np.triu_indices(N, k=1)] = np.arange(nparams)
     else:
+        sublattice = jnp.asarray(sublattice)
+        if sublattice.ndim == 1:
+            sublattice = jnp.diag(sublattice)
+
         lattice = get_lattice()
         c = lattice.shape[0]
 

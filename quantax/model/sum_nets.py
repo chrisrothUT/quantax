@@ -15,7 +15,7 @@ from ..nn import (
     ConvSymmetrize,
     Gconv,
 )
-from ..symmetry import Symmetry, Trans2D, SpinInverse
+from ..symmetry import Symmetry, Trans2D, Trans3D, SpinInverse
 from ..global_defs import get_lattice, is_default_cpl, get_subkeys
 from functools import partial
 from quantax.sites import Grid, Triangular, TriangularB, SquareB
@@ -188,8 +188,7 @@ def ResSumGconv(
     nblocks: int,
     channels: int,
     pg_symm: Symmetry,
-    mask1: Optional[jax.Array] = None,
-    mask2: Optional[jax.Array] = None,
+    masks: Optional[tuple[jax.Array]] = None,
     final_activation: Optional[Callable] = None,
     project: bool = True,
     spin_parity: int = 1,
@@ -226,15 +225,19 @@ def ResSumGconv(
     if spin_parity == 1 or spin_parity == -1:
         pg_symm = pg_symm + SpinInverse(spin_parity)
 
-    trans_symm = Trans2D()
-
     lattice = get_lattice()
+
+    if lattice.ndim == 2:
+        trans_symm = Trans2D()
+    else:
+        trans_symm = Trans3D()
+
     if isinstance(lattice, TriangularB) or isinstance(lattice, SquareB):
         reshape = Reshape_TriangularB(dtype)
     else:
         reshape = ReshapeConv(dtype)
 
-    idxarray, npoint = compute_idxarray(pg_symm, trans_symm, mask1, mask2)
+    idxarray, npoint = compute_idxarray(pg_symm, trans_symm, masks)
 
     embedding = Gconv(channels,1,idxarray,npoint,True,get_subkeys(),spin_parity,dtype)
 
@@ -273,13 +276,13 @@ def ResSumGconv(
 
     return Sequential(layers, holomorphic=False)
 
-def compute_idxarray(pg_symm, trans_symm, mask1, mask2):
+def compute_idxarray(pg_symm, trans_symm, masks):
     
     lattice = get_lattice()
 
     pg_perms = jnp.argsort(pg_symm._perm)
     trans_perms = trans_symm._perm
-    
+
     @partial(jax.vmap,in_axes=(0,None))
     @partial(jax.vmap,in_axes=(None,0))
     def take(x,y):
@@ -288,33 +291,37 @@ def compute_idxarray(pg_symm, trans_symm, mask1, mask2):
     perms = take(pg_perms,trans_perms)
     perms = perms.reshape(-1,perms.shape[-1])
         
-    npoint = len(perms)//(lattice.shape[1]*lattice.shape[2])        
+    npoint = len(perms)//jnp.prod(np.asarray(lattice.shape[1:]))        
 
-    perms = perms.reshape(npoint, lattice.shape[1],lattice.shape[2],-1)
-    inv_perms = jnp.argsort(perms[:,0,0],-1)
+    perms = perms.reshape(npoint, *lattice.shape[1:],-1)
 
-    if mask1 is None or mask2 is None:
-        lattice = get_lattice()
+    lattice = get_lattice()
+
+    if masks is None:
         if isinstance(lattice,Grid) and lattice.ndim == 2:
-            mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
-            mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])        
+            masks = (jnp.asarray([-1,-1,-1,0,0,0,1,1,1]),jnp.asarray([-1,0,1,-1,0,1,-1,0,1])) 
+        elif isinstance(lattice,Grid) and lattice.ndim == 3:
+            masks = (jnp.concatenate((jnp.zeros([9],dtype=jnp.int16),jnp.ones([9],dtype=jnp.int16))),jnp.repeat(jnp.asarray([-1,0,1,-1,0,1]),3),jnp.tile(jnp.asarray([-1,0,1]),6))
         elif isinstance(lattice,Triangular):
-            mask1 = jnp.asarray([-1,-1,-1,0,0,0,1,1,1])
-            mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
+            masks = (jnp.asarray([-1,-1,-1,0,0,0,1,1,1]),jnp.asarray([0,1,-1,0,1,-1,0]))
         elif isinstance(lattice,TriangularB):
-            mask1 = jnp.asarray([-1,-2,1,0,-1,2,1])
-            mask2 = jnp.asarray([0,1,-1,0,1,-1,0])
+            masks = (jnp.asarray([-1,-2,1,0,-1,2,1]),jnp.asarray([0,1,-1,0,1,-1,0]))
         elif isinstance(lattice,SquareB):
-            mask1 = jnp.asarray([0,-1,-2,1,0,-1,2,1,0])
-            mask2 = jnp.asarray([-1,0,1,-1,0,1,-1,0,1])
+            masks = (jnp.asarray([0,-1,-2,1,0,-1,2,1,0]),jnp.asarray([-1,0,1,-1,0,1,-1,0,1]))
         else:
             raise ValueError('No GCNN defined for this lattice type')
 
-    perms = perms[:,mask1,mask2]
-    
+    #Fix this to be more general
+    if lattice.ndim == 2:
+        inv_perms = jnp.argsort(perms[:,0,0],-1)
+        perms = perms[:,masks[0],masks[1]]
+    elif lattice.ndim == 3:
+        inv_perms = jnp.argsort(perms[:,0,0,0],-1)
+        perms = perms[:,masks[0],masks[1],masks[2]]
+
     perms = perms.reshape(-1,perms.shape[-1])
 
-    idxarray = jnp.zeros([npoint,npoint*len(mask1)],dtype=jnp.int16)
+    idxarray = jnp.zeros([npoint,npoint*len(masks[0])],dtype=jnp.int16)
 
     for i, inv_perm in enumerate(inv_perms):
         for j, perm in enumerate(perms):
@@ -326,7 +333,7 @@ def compute_idxarray(pg_symm, trans_symm, mask1, mask2):
 
             idxarray = idxarray.at[i,j].set(k.astype(jnp.int16))
 
-    idxarray = idxarray.reshape(npoint,npoint,len(mask1))
+    idxarray = idxarray.reshape(npoint,npoint,len(masks[0]))
 
     return idxarray, npoint
 
