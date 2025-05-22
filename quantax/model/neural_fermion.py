@@ -408,7 +408,6 @@ class BackflowPfaffian(Sequential, RefModel):
 
         self.Nhidden = _get_default_Nhidden(pairing_net) if Nhidden is None else Nhidden
         
-        pairing_net.layers[-2]
         if trans_symm is None and hasattr(pairing_net.layers[-2],'trans_symm'):
             self.trans_symm = pairing_net.layers[-2].trans_symm
         else:
