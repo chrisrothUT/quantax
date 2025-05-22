@@ -535,9 +535,9 @@ def _get_pfaffian_indices(sublattice, N):
         nparams = nparams*(ns*c)**2
         nparams = nparams.item()
 
-        full_index = np.asarray(full_index.reshape(N,N)).astype(np.uint32)
-        sub_inds = np.asarray(sub_inds).astype(np.uint32)
-        index = np.argsort(np.asarray(index).astype(np.uint32).ravel() - 1)
+        full_index = jnp.asarray(full_index.reshape(N,N)).astype(jnp.uint16)
+        sub_inds = jnp.asarray(sub_inds).astype(jnp.uint16)
+        index = jnp.argsort(jnp.asarray(index).astype(jnp.uint16).ravel() - 1)
 
     return full_index, index, sub_inds, nparams
 

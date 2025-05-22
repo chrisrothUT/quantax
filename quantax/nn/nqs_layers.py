@@ -88,7 +88,8 @@ class Gconv(eqx.Module):
             nelems = npoint*idxarray.shape[-1]
             scale = (2/(in_features*nelems))**0.5
 
-        self.weight = jax.random.normal(key, [out_features,in_features,nelems],dtype=dtype)*scale
+        self.weight = jax.random.normal(key, [out_features,in_features,nelems],dtype=dtype)*jnp.asarray([scale],dtype=dtype)
+
         self.idxarray = idxarray 
 
         super().__init__() 
