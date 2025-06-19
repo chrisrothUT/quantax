@@ -452,12 +452,8 @@ def _low_rank_update_pfaffian(
         return old_psi * rat * parity
 
 def in_unit_cell(ind,tol=1e-5):
-    c1 = ind[0] > -tol
-    c2 = ind[0] < 1-tol
-    c3 = ind[1] > -tol
-    c4 = ind[1] < 1-tol
     
-    return c1*c2*c3*c4
+    return np.all(ind > -tol)*np.all(ind < 1-tol)
   
 
 def _get_pfaffian_indices(sublattice, N):
