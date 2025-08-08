@@ -377,7 +377,7 @@ def _get_default_Nhidden(net: eqx.Module) -> int:
         raise ValueError("Can't determine the default number of hidden fermions.")
 
 
-class BackflowPfaffian(Sequential, RefModel):
+class HiddenPfaffian(Sequential, RefModel):
     Nhidden: int
     layers: Tuple[eqx.Module, ...]
     holomorphic: bool
@@ -617,7 +617,7 @@ class BackflowPfaffian(Sequential, RefModel):
         else:
             return psi
 
-class _FullOrbsLayerHFPS(RawInputLayer):
+class _FullOrbsLayerHidHid(RawInputLayer):
     F: jax.Array
     F_hidden: jax.Array
     index: jax.Array
@@ -765,7 +765,7 @@ def _get_default_Nhidden(net: eqx.Module) -> int:
         raise ValueError("Can't determine the default number of hidden fermions.")
 
 
-class HiddenPfaffian(Sequential, RefModel):
+class HiddenPfaffianHidHid(Sequential, RefModel):
     Nhidden: int
     layers: Tuple[eqx.Module, ...]
     holomorphic: bool
@@ -820,7 +820,7 @@ class HiddenPfaffian(Sequential, RefModel):
             self.pg_symm = pg_symm
             reshape_layer = eqx.nn.Lambda(lambda x: x)
 
-        full_orbs_layer = _FullOrbsLayerHFPS(
+        full_orbs_layer = _FullOrbsLayerHidHid(
             self.Nhidden, self.trans_symm, self.pg_symm, self.sublattice, dtype
         )
 

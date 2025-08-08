@@ -14,4 +14,4 @@ from .fermion_mf import (
     PairProduct,
 )
 
-from .neural_fermion import NeuralJastrow, HiddenPfaffian, BackflowPfaffian
+from .neural_fermion import NeuralJastrow, HiddenPfaffian, HiddenPfaffianHidHid
