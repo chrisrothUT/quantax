@@ -192,6 +192,7 @@ def ResSumGconv(
     final_activation: Optional[Callable] = None,
     project: bool = True,
     spin_parity: int = 1,
+    c4_break: bool = False,
     dtype: jnp.dtype = jnp.float32,
 ):
     """
@@ -272,7 +273,10 @@ def ResSumGconv(
         layers.append(ConvSymmetrize(trans_symm + pg_symm))
     else:
         layers.append(ReorderingLayer(pg_symm, trans_symm))
-        layers.append(eqx.nn.Lambda(lambda x: x.reshape(channels,npoint,-1)))
+        if c4_break == True:
+            layers.append(eqx.nn.Lambda(lambda x: x.reshape(channels,2,2,-1)[:,:,0].reshape(channels,8,-1)))
+        else:
+            layers.append(eqx.nn.Lambda(lambda x: x.reshape(channels,npoint,-1)))
 
     return Sequential(layers, holomorphic=False)
 
