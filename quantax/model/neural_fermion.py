@@ -234,7 +234,7 @@ class _ConstantPairing(eqx.Module):
 class _FullOrbsLayerPfaffian(RawInputLayer):
     F: jax.Array
     F_hidden: jax.Array
-    index: jax.Array 
+    index: jax.Array
     Nhidden: int
     holomorphic: bool
     trans_symm: Symmetry
