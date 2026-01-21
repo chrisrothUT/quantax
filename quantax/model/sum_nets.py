@@ -254,10 +254,6 @@ def ResSumGconv(
     if isinstance(lattice, TriangularB) or isinstance(lattice, SquareB):
         layers.append(ReshapeTo_TriangularB(dtype))
 
-    if is_default_cpl():
-        cpl_layer = eqx.nn.Lambda(lambda x: pair_cpl(x))
-        layers.append(cpl_layer)
-
     if final_activation is None:
         final_activation = Exp()
     elif not isinstance(final_activation, eqx.Module):
@@ -277,6 +273,10 @@ def ResSumGconv(
             layers.append(eqx.nn.Lambda(lambda x: x.reshape(channels,2,2,-1)[:,:,0].reshape(channels,8,-1)))
         else:
             layers.append(eqx.nn.Lambda(lambda x: x.reshape(channels,npoint,-1)))
+
+    if is_default_cpl():
+        cpl_layer = eqx.nn.Lambda(lambda x: pair_cpl(x))
+        layers.append(cpl_layer)
 
     return Sequential(layers, holomorphic=False)
 
@@ -307,7 +307,7 @@ def compute_idxarray(pg_symm, trans_symm, masks):
         elif isinstance(lattice,Grid) and lattice.ndim == 3:
             masks = (jnp.concatenate((jnp.zeros([9],dtype=jnp.int16),jnp.ones([9],dtype=jnp.int16))),jnp.repeat(jnp.asarray([-1,0,1,-1,0,1]),3),jnp.tile(jnp.asarray([-1,0,1]),6))
         elif isinstance(lattice,Triangular):
-            masks = (jnp.asarray([-1,-1,-1,0,0,0,1,1,1]),jnp.asarray([0,1,-1,0,1,-1,0]))
+            masks = (jnp.asarray([-1,-1,0,0,0,1,1]),jnp.asarray([0,1,-1,0,1,-1,0]))
         elif isinstance(lattice,TriangularB):
             masks = (jnp.asarray([-1,-2,1,0,-1,2,1]),jnp.asarray([0,1,-1,0,1,-1,0]))
         elif isinstance(lattice,SquareB):

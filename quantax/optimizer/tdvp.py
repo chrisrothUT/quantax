@@ -108,7 +108,7 @@ class QNGD:
     def _solve(
         self, Obar: jax.Array, Ebar: jax.Array, last_step: jax.Array
     ) -> jax.Array:
-        Ebar -= self._kazcmarz_mu * Obar @ last_step.astype(Obar.dtype)
+        #Ebar -= self._kazcmarz_mu * Obar @ last_step.astype(Obar.dtype)
 
         if self.vs_type == VS_TYPE.real_or_holomorphic:
             if not self._imag_time:
@@ -127,7 +127,7 @@ class QNGD:
             step = step[0] + 1j * step[1]
         step = step.astype(get_default_dtype())
 
-        step += self._kazcmarz_mu * last_step.astype(step.dtype)
+        #step += self._kazcmarz_mu * last_step.astype(step.dtype)
         return step
 
     def solve(self, Obar: jax.Array, Ebar: jax.Array) -> jax.Array:

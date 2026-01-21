@@ -5,9 +5,10 @@ import jax.numpy as jnp
 import equinox as eqx
 from .modules import NoGradLayer, RawInputLayer
 from ..symmetry import Symmetry, TransND, Identity
-from ..global_defs import get_lattice
+from ..global_defs import get_lattice, get_subkeys, get_sites
 from ..utils import _triangularb_circularpad
 from ..sites import TriangularB, SquareB
+from jax import random as jr
 
 class ReshapeConv(NoGradLayer):
     """
@@ -65,6 +66,91 @@ class ConvSymmetrize(NoGradLayer, RawInputLayer):
         x = self.symm.symmetrize(x, s)
 
         return x
+
+
+class SymmetryBreakingLayerEmbedding(eqx.Module):
+
+    jast_inds: jax.Array
+    reverse: jax.Array
+    sub_inds: jax.Array
+    W: jax.Array
+    pow_two_array: jax.Array
+    dtype: jnp.dtype
+
+    def __init__(self, jast_inds, sub_inds, dtype = jnp.float64):
+        
+        self.jast_inds = jast_inds
+        self.reverse = jnp.argsort(jast_inds)
+        self.sub_inds = sub_inds
+        self.dtype = dtype
+
+        embedding_size = jnp.power(2,2*len(sub_inds))
+
+        self.pow_two_array = jnp.power(2,2*len(sub_inds))[None,None]
+
+        self.W = jr.normal(get_subkeys(), (embedding_size,2*len(sub_inds)), dtype=dtype)
+
+    def __call__(self,x):
+        x = x.reshape(2,-1)
+        x = x[:,self.jast_inds].reshape(2,-1,len(self.sub_inds)).transpose(1,0,2).reshape(-1,2*len(self.sub_inds))
+
+        inds = jnp.sum(jax.nn.relu(x)*self.pow_two_array,-1)
+
+        x = self.W[inds]
+
+        x = x.reshape(-1,2,len(self.sub_inds)).transpose(1,0,2)
+
+        x = x.reshape(2,-1)[:,self.reverse]
+
+        return x.ravel()
+
+class SymmetryBreakingLayer(eqx.Module):
+
+    jast_inds: jax.Array
+    sub_inds: jax.Array
+    reverse: jax.Array
+    W: jax.Array
+    dtype: jnp.dtype
+
+    def __init__(self, jast_inds, sub_inds, features, dtype = jnp.float64):
+        
+        self.jast_inds = jast_inds
+        self.sub_inds = sub_inds
+
+        self.reverse = jnp.argsort(jast_inds)
+        self.dtype = dtype
+        mat_size = len(sub_inds)*features
+        
+        self.W = jr.normal(get_subkeys(), (mat_size,mat_size), dtype=dtype)
+
+    def __call__(self,x):
+        return jax.vmap(self.fwd, in_axes=1,out_axes=1)(x)
+
+    def fwd(self,x):
+
+        #features point group spin symm
+        N = get_sites().N
+
+        x = x.reshape(-1,2,N)
+
+        x = x[:,:,self.jast_inds]
+        x = x.reshape(x.shape[0],x.shape[1],-1,len(self.sub_inds)).transpose(0,1,3,2)
+
+        features, n_spins, n_broken, _ = x.shape  
+
+        mat_size = features*n_spins*n_broken
+
+        x = x.reshape(mat_size,-1)
+
+        x = self.W @ x  / mat_size**0.5
+
+        x = x.reshape(features,n_spins,n_broken,-1).transpose(0,1,3,2)
+
+        x = x.reshape(features,n_spins,-1)
+
+        return x[:,:,self.reverse]
+  
+
 
 class Gconv(eqx.Module):
 
@@ -128,13 +214,13 @@ class Gconv(eqx.Module):
             weight = weight.transpose(0,2,1,3,4,5)
             weight = weight.reshape(weight.shape[0]*weight.shape[1],-1,weight.shape[4],weight.shape[5])
 
-            x = x.astype(weight)
+            x = x.astype(weight.dtype)
         
             return jax.lax.conv(x,weight,(1,1),'Valid')
         else:
             weight = weight.transpose(0,2,1,3,4,5,6)
             weight = weight.reshape(weight.shape[0]*weight.shape[1],-1,weight.shape[4],weight.shape[5],weight.shape[6])
 
-            x = x.astype(weight)
+            x = x.astype(weight.dtype)
             
             return jax.lax.conv(x,weight,(1,1,1),'Valid')

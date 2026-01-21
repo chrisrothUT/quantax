@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import equinox as eqx
-from ..nn import Sequential, RefModel, RawInputLayer, Scale, Exp
+from ..nn import Sequential, RefModel, RawInputLayer, Scale, Exp, SymmetryBreakingLayer
 from ..symmetry import Symmetry, Identity
 from ..symmetry.symmetry import _permutation_sign
 from ..utils import pfa_eye, pfaffian, array_set
@@ -26,7 +26,7 @@ def _to_sub_term(x: jax.Array, sublattice_inds: jax.Array) -> jax.Array:
 def _get_sublattice_spins(
     s: jax.Array, trans_symm: Optional[Symmetry], sublattice_inds: jax.Array,
 ) -> jax.Array:
-    if trans_symm is None:
+    if trans_symm is None or trans_symm == Identity():
         return s[..., None, :]
 
     perm = _to_sub_term(trans_symm._perm, sublattice_inds)
@@ -285,9 +285,12 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
 
     def pairing_and_jastrow(self, x: jax.Array) -> jax.Array:
         N = get_sites().N
+
         x = x.reshape(-1, 2 * N)
-        x_mf = x[: self.Nhidden]
+        
+        x_mf = x[: self.Nhidden] 
         jastrow = x[self.Nhidden :]
+
         jastrow = jnp.mean(jastrow.reshape(-1, N), axis=0)
 
         jastrow = jnp.where(jnp.isnan(jastrow),0,jastrow)
@@ -377,6 +380,7 @@ def _get_default_Nhidden(net: eqx.Module) -> int:
         raise ValueError("Can't determine the default number of hidden fermions.")
 
 
+
 class BackflowPfaffian(Sequential, RefModel):
     Nhidden: int
     layers: Tuple[eqx.Module, ...]
@@ -408,7 +412,7 @@ class BackflowPfaffian(Sequential, RefModel):
 
         self.Nhidden = _get_default_Nhidden(pairing_net) if Nhidden is None else Nhidden
         
-        if trans_symm is None and hasattr(pairing_net.layers[-2],'trans_symm'):
+        if trans_symm is None and hasattr(pairing_net.layers[-3],'trans_symm'):
             self.trans_symm = pairing_net.layers[-2].trans_symm
         else:
             self.trans_symm = trans_symm
@@ -421,8 +425,8 @@ class BackflowPfaffian(Sequential, RefModel):
             self.sublattice = sublattice
         
         if pg_symm is None:
-            if hasattr(pairing_net.layers[-2],'pg_symm'):
-                self.pg_symm = pairing_net.layers[-2].pg_symm
+            if hasattr(pairing_net.layers[-3],'pg_symm'):
+                self.pg_symm = pairing_net.layers[-3].pg_symm
                 reshape_layer = eqx.nn.Lambda(lambda x: x)
             else:
                 self.pg_symm = Identity()

@@ -478,7 +478,7 @@ def _get_pfaffian_indices(sublattice, N):
 
         ncells = N//(ns*c)
 
-        index = lattice.coord @ np.linalg.inv(lattice.basis_vectors)
+        index = (lattice.coord[:ncells] - lattice.coord[:1]) @ np.linalg.inv(lattice.basis_vectors)
 
         sublattice = np.asarray(sublattice)
         if sublattice.ndim == 1:
@@ -530,6 +530,7 @@ def _get_pfaffian_indices(sublattice, N):
 
         full_index = full_index[None,:,None]
         r = nparams*np.arange(ns*c)
+
         full_index = full_index + ns*c*r[:,None,None,None] 
         full_index = full_index + r[None,None,:,None]
         nparams = nparams*(ns*c)**2
