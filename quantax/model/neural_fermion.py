@@ -288,7 +288,8 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
 
         x = x.reshape(-1, 2 * N)
         
-        x_mf = x[: self.Nhidden] 
+        x_mf = x[: self.Nhidden]
+
         jastrow = x[self.Nhidden :]
 
         jastrow = jnp.mean(jastrow.reshape(-1, N), axis=0)
@@ -302,6 +303,7 @@ class _FullOrbsLayerPfaffian(RawInputLayer):
         F = self.F if self.F.ndim == 1 else jax.lax.complex(self.F[0], self.F[1])
 
         F_full = F[self.index]
+
         F_full = (F_full - F_full.T)/2
 
         return self.scale_layer(F_full)
