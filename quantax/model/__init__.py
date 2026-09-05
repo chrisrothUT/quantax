@@ -1,5 +1,5 @@
 from .prod_nets import SingleDense, RBM_Dense, SingleConv, RBM_Conv, ResProd, SchmittNet
-from .sum_nets import ResSum, ResSumGconv
+from .sum_nets import ResSum, ResSumGconv, GConvFFT
 from .transformer import ConvTransformer
 from .sign_nets import SgnNet, MarshallSign, StripeSign, Neel120
 from .triangular_nets import (
@@ -14,4 +14,4 @@ from .fermion_mf import (
     PairProduct,
 )
 
-from .neural_fermion import NeuralJastrow, HiddenPfaffian, BackflowPfaffian
+from .neural_fermion import NeuralJastrow, BackflowPfaffian, BackflowPfaffianFixed

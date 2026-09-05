@@ -4,6 +4,7 @@ from typing import Sequence, Optional, Union, Tuple
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jaxtyping import Array
 from quspin.basis import (
     spin_basis_general,
     spinful_fermion_basis_general,
@@ -378,3 +379,25 @@ class Symmetry:
         )
         return new_symm
 
+
+def product_table(perms) -> Array:
+    
+    inverse = jnp.argsort(perms,-1)
+    n_symm = len(perms)
+    lookup = np.unique(np.column_stack((perms, np.arange(len(perms)))), axis=0)
+
+    product_table = np.zeros([n_symm, n_symm], dtype=int)
+    for i, g_inv in enumerate(inverse):
+        row_perms = perms[:, g_inv]
+        row_perms = np.unique(
+            np.column_stack((row_perms, np.arange(len(perms)))), axis=0
+        )
+        # row_perms should be a permutation of perms, so identical after sorting
+        if np.any(row_perms[:, :-1] != lookup[:, :-1]):
+            raise RuntimeError(
+                "PermutationGroup is not closed under multiplication"
+            )
+        # match elements in row_perms to group indices
+        product_table[i, row_perms[:, -1]] = lookup[:, -1]
+
+    return product_table

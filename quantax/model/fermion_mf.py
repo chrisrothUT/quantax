@@ -577,6 +577,20 @@ class Pfaffian(RefModel):
         
         self.sublattice = sublattice
 
+    def parity_sign(self, x: jax.Array) -> jax.Array:
+        if get_lattice().is_fermion:
+            sign = 1
+        else:
+            n_up = (x == 1)
+            n_dn = (x == -1)
+
+            dn_before = jnp.cumsum(n_dn.astype(jnp.int32)) - n_dn.astype(jnp.int32)
+            parity = jnp.sum(n_up.astype(jnp.int32) * dn_before)
+
+            sign = 1 - 2 * (parity % 2)
+
+        return sign
+
     @property
     def F_full(self) -> jax.Array:
         F = self.F if self.F.ndim == 1 else jax.lax.complex(self.F[0], self.F[1])
@@ -589,7 +603,7 @@ class Pfaffian(RefModel):
     def __call__(self, x: jax.Array) -> jax.Array:
         idx = _get_fermion_idx(x, get_sites().Ntotal)
 
-        return pfaffian(self.F_full[idx, :][:, idx])
+        return pfaffian(self.F_full[idx, :][:, idx])*self.parity_sign(x)
 
     def rescale(self, maximum: jax.Array) -> Pfaffian:
         F = self.F / maximum.astype(self.F.dtype) ** (2 / get_sites().Ntotal)
@@ -622,9 +636,11 @@ class Pfaffian(RefModel):
         old_inv = internal["inv"]
         old_psi = internal["psi"]
 
-        return _low_rank_update_pfaffian(
+        psi, internal =  _low_rank_update_pfaffian(
             self.F_full, x, x_old, nflips, occ_idx, old_inv, old_psi, True
         )
+
+        return psi*self.parity_sign(x), internal
 
     def ref_forward(
         self,
@@ -643,6 +659,8 @@ class Pfaffian(RefModel):
         old_psi = internal["psi"][idx_segment]
         x_old = x_old[idx_segment]
 
-        return _low_rank_update_pfaffian(
+        psi = _low_rank_update_pfaffian(
             self.F_full, x, x_old, nflips, occ_idx, old_inv, old_psi, False
         )
+
+        return psi*self.parity_sign(x)

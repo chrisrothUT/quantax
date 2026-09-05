@@ -9,6 +9,12 @@ from ..global_defs import get_lattice, get_subkeys, get_sites
 from ..utils import _triangularb_circularpad
 from ..sites import TriangularB, SquareB
 from jax import random as jr
+import math
+from typing import Any, Callable
+import equinox as eqx
+import numpy as np
+from jax import lax
+
 
 class ReshapeConv(NoGradLayer):
     """
@@ -224,3 +230,271 @@ class Gconv(eqx.Module):
             x = x.astype(weight.dtype)
             
             return jax.lax.conv(x,weight,(1,1,1),'Valid')
+
+def zeros(key, shape, dtype):
+    return jnp.zeros(shape, dtype)
+
+
+def default_equivariant_initializer(key, shape, dtype):
+    fan_in = np.prod(shape[1:])
+    std = 1.0 / math.sqrt(fan_in)
+    return std * jax.random.normal(key, shape, dtype)
+
+
+class DenseSymmFFT(eqx.Module):
+    # trainable arrays
+    kernel: jax.Array
+
+    # static fields
+    space_group: Any = eqx.field(static=True)
+    features: int = eqx.field(static=True)
+    shape: tuple[int, ...] = eqx.field(static=True)
+    mask: Any = eqx.field(static=True)
+    precision: Any = eqx.field(static=True)
+
+    n_cells: int = eqx.field(static=True)
+    n_symm: int = eqx.field(static=True)
+    n_point: int = eqx.field(static=True)
+    sites_per_cell: int = eqx.field(static=True)
+    mapping: Any = eqx.field(static=True)
+    kernel_indices: Any = eqx.field(static=True)
+
+    def __init__(
+        self,
+        space_group,
+        features: int,
+        in_features: int,
+        shape: tuple[int, ...],
+        *,
+        key,
+        mask=None,
+        param_dtype=jnp.float32,
+        precision=None,
+        kernel_init: Callable = default_equivariant_initializer,
+    ):
+        sg = np.asarray(space_group)
+
+        self.space_group = space_group
+        self.features = features
+        self.shape = tuple(shape)
+        self.mask = mask
+        self.precision = precision
+
+        self.n_cells = int(np.prod(np.asarray(shape)))
+        self.n_symm = len(sg)
+        self.n_point = self.n_symm // self.n_cells
+        self.sites_per_cell = sg.shape[1] // self.n_cells
+
+        if mask is not None:
+            mask_arr = np.asarray(mask.wrapped if hasattr(mask, "wrapped") else mask)
+            (self.kernel_indices,) = np.nonzero(mask_arr)
+            kernel_shape = (features, in_features, len(self.kernel_indices))
+        else:
+            self.kernel_indices = None
+            kernel_shape = (
+                features,
+                in_features,
+                self.n_cells * self.sites_per_cell,
+            )
+
+        # maps kernel site dimension to:
+        # (sites_per_cell, n_point, *shape)
+        self.mapping = (
+            sg[:, ::self.n_cells]
+            .reshape(self.n_cells, self.n_point, self.sites_per_cell)
+            .transpose(2, 1, 0)
+            .reshape(self.sites_per_cell, self.n_point, *self.shape)
+        )
+
+        k1, k2 = jax.random.split(key)
+
+        self.kernel = kernel_init(k1, kernel_shape, param_dtype)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """
+        Input shape:
+            (..., in_features, n_sites)
+
+        Output shape:
+            (..., features, n_symm)
+        """
+        if x.ndim < 2:
+            x = x[None]
+
+        in_features = x.shape[0]
+
+        x = x.reshape(in_features, self.sites_per_cell, *self.shape)
+
+        if self.kernel_indices is not None:
+            kernel_full = jnp.zeros(
+                (
+                    self.features,
+                    in_features,
+                    self.n_cells * self.sites_per_cell,
+                ),
+                dtype=self.kernel.dtype,
+            )
+            kernel = kernel_full.at[:, :, self.kernel_indices].set(self.kernel)
+        else:
+            kernel = self.kernel
+
+        # promote manually
+        dtype = jnp.result_type(x, kernel)
+        x = x.astype(dtype)
+        kernel = kernel.astype(dtype)
+
+        # Expand kernel to:
+        # (features, in_features, sites_per_cell, n_point, *shape)
+        
+        kernel = kernel[..., self.mapping]
+
+        x = jnp.fft.fftn(x, s=self.shape).reshape(*x.shape[:2], self.n_cells)
+
+        kernel = jnp.fft.fftn(kernel, s=self.shape).reshape(
+            *kernel.shape[:4], self.n_cells
+        )
+
+        x = lax.dot_general(
+            x,
+            kernel,
+            (((0, 1), (1, 2)), ((2,), (4,))),
+            precision=self.precision,
+        )
+
+        x = x.transpose(1, 2, 0)
+        x = x.reshape(*x.shape[:2], *self.shape)
+
+        x = jnp.fft.ifftn(x, s=self.shape).reshape(*x.shape[:2], self.n_cells)
+        
+        x = x.transpose(0, 2, 1)
+
+        x = x.reshape(self.features, self.n_symm)
+
+        return x.real if not jnp.issubdtype(x.dtype, jnp.complexfloating) else x
+    
+
+class DenseEquivariantFFT(eqx.Module):
+    # trainable
+    kernel: jax.Array
+
+    # static
+    product_table: Any = eqx.field(static=True)
+    features: int = eqx.field(static=True)
+    shape: tuple[int, ...] = eqx.field(static=True)
+    mask: Any = eqx.field(static=True)
+    precision: Any = eqx.field(static=True)
+
+    n_symm: int = eqx.field(static=True)
+    n_cells: int = eqx.field(static=True)
+    n_point: int = eqx.field(static=True)
+    mapping: Any = eqx.field(static=True)
+    kernel_indices: Any = eqx.field(static=True)
+
+    def __init__(
+        self,
+        product_table,
+        features: int,
+        in_features: int,
+        shape: tuple[int, ...],
+        *,
+        key,
+        mask=None,
+        param_dtype=jnp.float32,
+        precision=None,
+        kernel_init: Callable = default_equivariant_initializer,
+    ):
+        pt = np.asarray(product_table)
+
+        self.product_table = product_table
+        self.features = features
+        self.shape = tuple(shape)
+        self.mask = mask
+        self.precision = precision
+
+        self.n_symm = len(pt)
+        self.n_cells = int(np.prod(np.asarray(shape)))
+        self.n_point = self.n_symm // self.n_cells
+
+        if mask is not None:
+            mask_arr = np.asarray(mask.wrapped if hasattr(mask, "wrapped") else mask)
+            (self.kernel_indices,) = np.nonzero(mask_arr)
+            kernel_shape = (features, in_features, len(self.kernel_indices))
+        else:
+            self.kernel_indices = None
+            kernel_shape = (
+                features,
+                in_features,
+                self.n_point * self.n_cells,
+            )
+
+        # maps kernel group dimension to:
+        # (n_point_in, n_point_out, *shape)
+        self.mapping = (
+            pt[: self.n_point]
+            .reshape(self.n_point, self.n_cells, self.n_point)
+            .transpose(0, 2, 1)
+            .reshape(self.n_point, self.n_point, *self.shape)
+        )
+
+        self.kernel = kernel_init(key, kernel_shape, param_dtype)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        """
+        Input:
+            x.shape == (..., in_features, n_symm)
+
+        Output:
+            y.shape == (..., features, n_symm)
+        """
+
+        in_features = x.shape[0]
+
+        x = x.reshape(in_features, self.n_cells, self.n_point)
+        x = x.transpose(0, 2, 1)
+        x = x.reshape(*x.shape[:-1], *self.shape)
+
+        if self.kernel_indices is not None:
+            kernel_full = jnp.zeros(
+                (
+                    self.features,
+                    in_features,
+                    self.n_point * self.n_cells,
+                ),
+                dtype=self.kernel.dtype,
+            )
+            kernel = kernel_full.at[:, :, self.kernel_indices].set(self.kernel)
+        else:
+            kernel = self.kernel
+
+        dtype = jnp.result_type(x, kernel)
+        x = x.astype(dtype)
+        kernel = kernel.astype(dtype)
+
+        # kernel:
+        # (features, in_features, n_point_in, n_point_out, *shape)
+        kernel = kernel[..., self.mapping]
+
+        x = jnp.fft.fftn(x, s=self.shape).reshape(*x.shape[:2], self.n_cells)
+
+        kernel = jnp.fft.fftn(kernel, s=self.shape).reshape(
+            *kernel.shape[:4], self.n_cells
+        )
+
+        x = lax.dot_general(
+            x,
+            kernel,
+            (((0, 1), (1, 2)), ((2,), (4,))),
+            precision=self.precision,
+        )
+
+        x = x.transpose(1, 2, 0)
+        x = x.reshape(*x.shape[:2], *self.shape)
+
+        x = jnp.fft.ifftn(x, s=self.shape).reshape(*x.shape[:2], self.n_cells)
+        x = x.transpose(0, 2, 1)
+        x = x.reshape(self.features, self.n_symm)
+
+        if jnp.can_cast(x.dtype, dtype):
+            return x
+        else:
+            return x.real

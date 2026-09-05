@@ -1,4 +1,4 @@
-from .symmetry import Symmetry
+from .symmetry import Symmetry, product_table
 from .common_symmetries import (
     Identity,
     Z2Inversion,

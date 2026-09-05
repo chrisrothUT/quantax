@@ -14,8 +14,10 @@ from ..nn import (
     ReshapeConv,
     ConvSymmetrize,
     Gconv,
+    DenseSymmFFT,
+    DenseEquivariantFFT,
 )
-from ..symmetry import Symmetry, Trans2D, Trans3D, SpinInverse
+from ..symmetry import Symmetry, Trans2D, Trans3D, SpinInverse, product_table
 from ..global_defs import get_lattice, is_default_cpl, get_subkeys
 from functools import partial
 from quantax.sites import Grid, Triangular, TriangularB, SquareB
@@ -277,6 +279,8 @@ def ResSumGconv(
     if is_default_cpl():
         cpl_layer = eqx.nn.Lambda(lambda x: pair_cpl(x))
         layers.append(cpl_layer)
+    else:
+        layers.append(eqx.nn.Lambda(lambda x: x))
 
     return Sequential(layers, holomorphic=False)
 
@@ -284,7 +288,8 @@ def compute_idxarray(pg_symm, trans_symm, masks):
     
     lattice = get_lattice()
 
-    pg_perms = jnp.argsort(pg_symm._perm)
+    pg_perms = pg_symm._perm
+    #pg_perms = jnp.argsort(pg_symm._perm)
     trans_perms = trans_symm._perm
 
     @partial(jax.vmap,in_axes=(0,None))
@@ -381,3 +386,57 @@ def _reordering_perm(pg_symm, trans_symm):
             full_perm = full_perm.at[m].set(i * T + j)
 
     return full_perm
+
+def GConvFFT(
+    layers: int,
+    features: int,
+    pg_symm: Symmetry,
+    inp_mask: Optional[np.ndarray]=None,
+    hid_mask: Optional[np.ndarray]=None,
+    project: bool = True,
+    dtype: jnp.dtype = jnp.float32,
+):
+
+    shape = get_lattice().shape[-2:]
+    n_trans = np.prod(np.asarray(shape))
+
+    symm = Trans2D() + pg_symm 
+    perms = jnp.argsort(symm._perm,-1)
+    n_point = len(perms) // n_trans
+
+    pt = product_table(perms)
+
+    if hid_mask is not None:
+        hid_mask = np.repeat(hid_mask,n_point)
+    
+    modules = [DenseSymmFFT(
+        space_group=perms,
+        features=features,
+        in_features=1,
+        shape=shape,
+        mask=inp_mask,
+        key=jax.random.PRNGKey(0),
+        param_dtype=dtype,
+    )]
+
+    for i in range(layers):
+        modules.append(eqx.nn.Lambda(lambda x: jax.nn.selu(x)))
+        modules.append(DenseEquivariantFFT(
+        product_table=pt,
+        features=features,
+        in_features=features,
+        shape=shape,
+        mask=hid_mask,
+        key=jax.random.PRNGKey(0),
+        param_dtype=dtype,
+    ))
+
+    if project == True:
+        modules.append(ConvSymmetrize(symm))
+    else:
+        modules.append(eqx.nn.Lambda(lambda x: x.reshape(features,n_trans,-1).transpose(0,2,1).reshape(features,-1)))        
+        modules.append(ReorderingLayer(pg_symm, Trans2D()))
+        modules.append(eqx.nn.Lambda(lambda x: x.reshape(features,-1,n_trans)))
+        
+    
+    return Sequential(modules,holomorphic=False)

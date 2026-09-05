@@ -177,25 +177,41 @@ def LinearTransform(
 
     coord = lattice.coord
     new_coord = np.einsum("ij,nj->ni", matrix, coord)
+
     basis = lattice.basis_vectors.T
-    new_xyz = np.linalg.solve(basis, new_coord.T).T  # dimension: ni
-    offsets_xyz = np.linalg.solve(basis, lattice.site_offsets.T).T  # oi
+    new_xyz_all = np.linalg.solve(basis, new_coord.T).T
+    offsets_xyz = np.linalg.solve(basis, lattice.site_offsets.T).T
 
-    # site n, offset o, coord i
-    new_xyz = new_xyz[None, :, :] - offsets_xyz[:, None, :]
-    correct_offsets = np.abs(np.round(new_xyz) - new_xyz) < tol
-    correct_offsets = np.all(correct_offsets, axis=2)
-    offsets_idx = np.nonzero(correct_offsets)[0]
-    new_xyz = np.rint(new_xyz[correct_offsets]).astype(np.int64)
+    # offset o, site n, coord i
+    diff = new_xyz_all[None, :, :] - offsets_xyz[:, None, :]
 
-    shape = np.asarray(lattice.shape[1:])[None, ...]
-    shift = new_xyz // shape
-    new_xyz = new_xyz - shift * shape
+    is_integer = np.abs(np.round(diff) - diff) < tol
+    correct_offsets = np.all(is_integer, axis=2)  # shape (n_offsets, n_sites)
 
-    slicing = (offsets_idx,) + tuple(item for item in new_xyz.T)
+    offsets_idx, site_idx = np.nonzero(correct_offsets)
+
+    # ensure exactly one offset match per original site
+    counts = np.bincount(site_idx, minlength=lattice.N)
+    if not np.all(counts == 1):
+        bad = np.where(counts != 1)[0]
+        raise ValueError(f"Some sites have !=1 matching offset: {bad[:20]}")
+
+    # sort back into original site order
+    order = np.argsort(site_idx)
+    offsets_idx = offsets_idx[order]
+    site_idx = site_idx[order]
+
+    new_xyz = np.rint(diff[offsets_idx, site_idx]).astype(np.int64)
+
+    shape = np.asarray(lattice.shape[1:])
+    new_xyz = new_xyz % shape
+
+    slicing = (offsets_idx,) + tuple(new_xyz.T)
     generator = lattice.index_from_xyz[slicing]
+
     if lattice.is_fermion:
         generator = np.concatenate([generator, generator + lattice.N])
+
     return Symmetry(generator, sector, eigval=eigval)
 
 
