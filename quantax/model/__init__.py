@@ -12,3 +12,4 @@ from .fermion_mf import (
 )
 from .jastrow import Jastrow, GeneralJastrow
 from .backflow import DetBackflow, PfBackflow
+from .multiplicative_backflow import MultiplicativePfBackflow

@@ -45,6 +45,7 @@ neural network ``net``.
 
     DetBackflow
     PfBackflow
+    MultiplicativePfBackflow
 
 
 Jastrow factors

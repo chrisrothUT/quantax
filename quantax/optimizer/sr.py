@@ -2,13 +2,14 @@ from typing import Callable, BinaryIO
 from jax.typing import ArrayLike
 from pathlib import Path
 from functools import partial
+import math
 import jax
 import jax.numpy as jnp
 
 from .qngd import StochasticQNGD, ExactQNGD
 from .updater import SpringUpdater, MarchUpdater, AdamUpdater
 from .gradient import EnergyGrad
-from .solver import pinvh_solve
+from .solver import pinvh_solve, auto_pinv_eig
 from ..state import Variational, VS_TYPE
 from ..operator import Operator
 from ..sampler import Samples
@@ -180,6 +181,24 @@ class AdamSR(StochasticQNGD):
     This is a variant of SR with first and second order momentum (like Adam).
     The time cost is roughly twice of SR.
 
+    To use the norm-constrained algorithm, set ``C0``. The returned step then
+    already includes the factor
+    :math:`\gamma_t=\min(1,c_t/\|\delta\theta_t\|)`, where
+    :math:`c_t=C_0/(1+\max(t-t_0,0)/T)` and iterations start at one.
+    Momentum buffers track the unconstrained MinSR direction. With ``C0`` set,
+    the default solver is `~quantax.optimizer.auto_pinv_eig`, matching the
+    pseudoinverse in Algorithm S1; a supplied solver overrides this choice.
+    The schedule defaults below are configurable choices, not values specified
+    by the supplied equations.
+
+    .. code-block:: python
+
+        optimizer = AdamSR(state, hamiltonian, C0=0.1, t0=100, T=1000)
+        step = optimizer.get_step(samples)
+        state.update(step)  # norm constraint already applied; unit learning rate
+
+    With ``C0=None`` (the backward-compatible default), no norm constraint is
+    applied and the default solver remains ``auto_shift_eig``.
     A fixed learning rate leaves the parameters random-walking in a noise ball;
     for converged energies, decay the learning rate in the training loop, e.g.
     ``lr / (1 + max(t - t0, 0) / t0)``. Constraining the norm of the applied
@@ -196,6 +215,12 @@ class AdamSR(StochasticQNGD):
         mu: float = 0.95,
         beta: float = 0.995,
         clip: float | None = 5.0,
+        *,
+        clip_mode: str = "mean_std",
+        clip_scale_floor: float = 1e-8,
+        C0: float | None = None,
+        t0: float = 0.0,
+        T: float = 1000.0,
     ):
         r"""
         Initialize the AdamSR optimizer.
@@ -211,7 +236,8 @@ class AdamSR(StochasticQNGD):
 
         :param solver:
             The numerical solver for the matrix inverse,
-            default to `~quantax.optimizer.auto_shift_eig`.
+            default to ``auto_pinv_eig`` when C0 is set, otherwise
+            ``auto_shift_eig``. Both AdamSR solves use this solver.
 
         :param file:
             The file with stored buffers of the optimizer.
@@ -225,10 +251,66 @@ class AdamSR(StochasticQNGD):
         :param clip:
             Local-energy clipping passed to `~quantax.optimizer.EnergyGrad`,
             default to 5.0. Set to None to disable.
+
+        :param clip_mode:
+            EnergyGrad clipping mode: "mean_std" (default) or "median_mad".
+        :param clip_scale_floor:
+            Absolute floor on the median deviation in energy units (default 1e-8).
+
+        :param C0:
+            Initial maximum Euclidean parameter-step norm. None disables the
+            constraint. The returned step is ready for ``state.update(step)``.
+
+        :param t0:
+            Iteration at which the constraint starts decaying (one-based clock).
+
+        :param T:
+            Positive decay timescale in iterations.
         """
-        grad = EnergyGrad(hamiltonian, clip)
+        if C0 is not None and (not math.isfinite(C0) or C0 <= 0):
+            raise ValueError("C0 must be finite and positive, or None.")
+        if not math.isfinite(t0) or t0 < 0:
+            raise ValueError("t0 must be finite and nonnegative.")
+        if not math.isfinite(T) or T <= 0:
+            raise ValueError("T must be finite and positive.")
+        self._C0 = C0
+        self._t0 = t0
+        self._T = T
+        if C0 is not None and solver is None:
+            solver = auto_pinv_eig()
+        grad = EnergyGrad(
+            hamiltonian, clip, clip_mode=clip_mode, clip_scale_floor=clip_scale_floor
+        )
         updater = AdamUpdater(mu, beta)
         StochasticQNGD.__init__(self, state, grad, imag_time, solver, updater, file)
+
+    def get_step(self, samples: Samples | jax.Array) -> jax.Array:
+        """Return the AdamSR direction, optionally with its scheduled norm cap.
+
+        The schedule uses the accepted-update counter in the Adam buffers, so
+        saving/restoring the optimizer also preserves its schedule position.
+        Rejected nonfinite momentum updates do not advance this counter.
+        Nonfinite steps are returned unchanged for the caller to reject.
+        """
+        step = super().get_step(samples)
+        if self._C0 is None:
+            return step
+        t = self._buffers["t"].astype(step.real.dtype)
+        bound = self._C0 / (1 + jnp.maximum(t - self._t0, 0) / self._T)
+        return _constrain_norm(step, bound)
+
+
+@jax.jit
+def _constrain_norm(step: jax.Array, bound: jax.Array) -> jax.Array:
+    """Apply a Euclidean norm bound without overflow when squaring a large step."""
+    largest = jnp.max(jnp.abs(step))
+    safe_largest = jnp.where(largest > 0, largest, 1)
+    scaled_norm = jnp.linalg.norm(step / safe_largest)
+    # Divide in this order to avoid overflowing the unscaled norm.
+    ratio = (bound / safe_largest) / jnp.where(scaled_norm > 0, scaled_norm, 1)
+    factor = jnp.where(largest == 0, 1, jnp.minimum(1, ratio))
+    finite = jnp.all(jnp.isfinite(step))
+    return jnp.where(finite, step * factor, step)
 
 
 class ER(ExactQNGD):

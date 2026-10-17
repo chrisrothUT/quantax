@@ -12,16 +12,56 @@ from ..utils import array_extend, to_distributed_array, where, isfinite
 from ..global_defs import get_default_dtype
 
 
+def _median_mad_residual(energies, weight, clip, scale_floor):
+    """Weighted median/MAD clipping with clipped-mean recentering.
+
+    MAD is the unscaled median absolute deviation (no Gaussian 1.4826 factor).
+    Zero-weight entries, including invalid samples, do not affect statistics.
+    Complex components are clipped separately. The floor is in energy units.
+    """
+
+    def weighted_median(values):
+        order = jnp.argsort(values)
+        values, weights = values[order], weight[order]
+        index = jnp.searchsorted(jnp.cumsum(weights), jnp.sum(weights) / 2, side="left")
+        return values[jnp.minimum(index, values.size - 1)]
+
+    def component(values):
+        center = weighted_median(values)
+        scale = jnp.maximum(weighted_median(jnp.abs(values - center)), scale_floor)
+        residual = jnp.clip(values - center, -clip * scale, clip * scale)
+        residual -= jnp.sum(residual * weight) / jnp.sum(weight)
+        return jnp.where(weight > 0, residual, 0)
+
+    if jnp.iscomplexobj(energies):
+        return component(energies.real) + 1j * component(energies.imag)
+    return component(energies)
+
+
 class EnergyGrad:
     r"""
     Energy gradient source defining :math:`\bar \epsilon` from the local energies
     of a Hamiltonian, used for ground-state search and time evolution.
     """
 
-    def __init__(self, hamiltonian: Operator, clip: Optional[float] = 5.0):
+    def __init__(
+        self,
+        hamiltonian: Operator,
+        clip: Optional[float] = 5.0,
+        *,
+        clip_mode: str = "mean_std",
+        clip_scale_floor: float = 1e-8,
+    ):
         r"""
         :param hamiltonian:
             The Hamiltonian for the evolution.
+
+        :param clip_mode:
+            "mean_std" preserves the original clipping. "median_mad" clips
+            around the weighted median at clip times the unscaled weighted median
+            absolute deviation, then subtracts the weighted clipped mean.
+        :param clip_scale_floor:
+            Positive absolute floor on the median deviation, in energy units.
 
         :param clip:
             Clipping the local energies to :math:`\bar E \pm c \sigma` to avoid divergence,
@@ -40,6 +80,16 @@ class EnergyGrad:
             it; pass ``clip=None`` when using `~quantax.optimizer.SR` with
             ``imag_time=False`` directly.
         """
+        if clip_mode not in ("mean_std", "median_mad"):
+            raise ValueError("clip_mode must be mean_std or median_mad")
+        import math
+
+        if not math.isfinite(clip_scale_floor) or clip_scale_floor <= 0:
+            raise ValueError("clip_scale_floor must be finite and positive")
+        if clip is not None and (not math.isfinite(clip) or clip <= 0):
+            raise ValueError("clip must be finite and positive, or None")
+        self._clip_mode = clip_mode
+        self._clip_scale_floor = clip_scale_floor
         self._hamiltonian = hamiltonian
         self._energy = None
         self._VarE = None
@@ -96,6 +146,12 @@ class EnergyGrad:
         Eloc = jnp.where(valid, Eloc, Emean)
         Evar = jnp.abs(Eloc - Emean) ** 2
         self._VarE = (jnp.mean(Evar * weight) / norm).real
+
+        if self._clip is not None and self._clip_mode == "median_mad":
+            residual = _median_mad_residual(
+                Eloc, weight, self._clip, self._clip_scale_floor
+            )
+            return residual * jnp.sqrt(weight / samples.nsamples)
 
         if self._clip is not None:
             sigma = jnp.sqrt(self._VarE)
