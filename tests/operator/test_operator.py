@@ -273,3 +273,47 @@ def test_nonzero_constant_shift_raises():
         H + 1.0
     # adding zero is a no-op and allowed
     assert (H + 0.0) is H
+
+
+# Complex and non-Hermitian local operators must use matrix rows, not columns.
+@pytest.mark.parametrize(
+    "case", ["complex_hopping", "directed_hopping", "spin_y", "ordered_product"]
+)
+@pytest.mark.parametrize("cached_psi", [False, True])
+def test_local_energy_matches_dense(case, cached_psi, x64):
+    from quantax.operator import (
+        create_u,
+        annihilate_u,
+        create_d,
+        annihilate_d,
+        number_u,
+        number_d,
+        sigma_y,
+    )
+
+    qtx.set_default_dtype(jnp.complex128)
+    if "hopping" in case:
+        qtx.sites.Chain(4, particle_type="spinful_fermion", Nparticles=(1, 1))
+        A = (0.3 + 0.8j) * (create_u(1) @ annihilate_u(0))
+        A += (0.4 - 0.2j) * (create_d(2) @ annihilate_d(1))
+        H = A + A.H if case == "complex_hopping" else A
+        H += 0.7 * (number_u(0) @ number_d(0))
+    else:
+        qtx.sites.Chain(2)
+        H = (
+            (0.4 + 0.3j) * sigma_y(0) + 0.2 * sigma_z(1)
+            if case == "spin_y"
+            else (
+                (0.2 + 0.6j) * (sigma_p(0) @ sigma_z(0) @ sigma_m(1)) + 0.7 * sigma_y(1)
+            )
+        )
+    symm = Identity()
+    symm.basis_make()
+    rng = np.random.default_rng(51)
+    psi = rng.normal(size=symm.basis.Ns) + 1j * rng.normal(size=symm.basis.Ns)
+    state = DenseState(jnp.asarray(psi))
+    spins = to_distributed_array(jnp.asarray(ints_to_array(symm.basis.states)))
+    samples = Samples(spins, state(spins)) if cached_psi else spins
+    actual = np.asarray(H.Oloc(state, samples))
+    expected = np.asarray(H.todense()) @ psi / psi
+    np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
