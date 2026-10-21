@@ -72,6 +72,10 @@ For example,
     number
     number_u
     number_d
+    create_flavor
+    annihilate_flavor
+    number_flavor
+    hopping_flavor
 
 
 Hamiltonians
@@ -83,6 +87,7 @@ Hamiltonians
     Heisenberg
     Ising
     Hubbard
+    HubbardFlavors
     tJ
     tV
 

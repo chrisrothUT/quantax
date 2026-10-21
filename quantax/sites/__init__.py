@@ -9,3 +9,5 @@ from .common_lattices import (
     Triangular,
     TriangularB,
 )
+
+from .flavor_lattice import FlavorLattice, TriangularFlavors

@@ -168,6 +168,8 @@ def rand_states(ns: int | None = None) -> jax.Array:
         The number of basis states.
         If not specified, only 1 basis state without batch dimension will be returned.
     """
+    from ..sites.flavor_lattice import FlavorLattice
+
     nsamples = 1 if ns is None else ns
     if nsamples % jax.device_count() == 0:
         sharding = get_distributed_sharding()
@@ -210,7 +212,16 @@ def rand_states(ns: int | None = None) -> jax.Array:
             else:
                 s = _rand_Nconserved_single_occ(key, shape, Nup, Ndown, sharding)
     elif sites.particle_type == PARTICLE_TYPE.spinless_fermion:
-        if Nparticles is None:
+        if isinstance(sites, FlavorLattice) and sites.flavor_counts is not None:
+            keys = jr.split(key, sites.nflavors)
+            s = jnp.concatenate(
+                [
+                    _rand_Nconserved(k, (nsamples, sites.Nphysical), count, sharding)
+                    for k, count in zip(keys, sites.flavor_counts)
+                ],
+                axis=1,
+            )
+        elif Nparticles is None:
             s = _rand_states(key, shape, sharding)
         else:
             s = _rand_Nconserved(key, shape, Nparticles, sharding)

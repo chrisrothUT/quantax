@@ -22,3 +22,11 @@ from .site_operator import (
     number_d,
 )
 from .common_operators import Heisenberg, Ising, Hubbard, tJ, tV
+
+from .flavor_operators import (
+    create_flavor,
+    annihilate_flavor,
+    number_flavor,
+    hopping_flavor,
+    HubbardFlavors,
+)

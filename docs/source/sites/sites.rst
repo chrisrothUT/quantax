@@ -9,6 +9,8 @@ and the particle type.
 .. note::
     Currently Quantax only supports spin-1/2 systems, spinless fermion systems, 
     and spin-1/2 fermion systems. See `~quantax.PARTICLE_TYPE`.
+    `FlavorLattice` and `TriangularFlavors` encode additional internal flavors
+    as blocks of spinless modes, with flavor-preserving neighbor graphs.
 
 .. warning::
     Unlike other NQS packages, in Quantax the spatial geometry and hilbert space 
@@ -25,6 +27,7 @@ Main classes
 
     Sites
     Lattice
+    FlavorLattice
 
 
 Common lattices
@@ -40,3 +43,4 @@ Common lattices
     Pyrochlore
     Triangular
     TriangularB
+    TriangularFlavors
