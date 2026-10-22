@@ -103,3 +103,13 @@ and a custom filter is any callable ``(opstr, indices) -> dict[str, int]``.
     none_filter
     nflips_filter
     nflips_up_dn_filter
+
+
+Batched Hamiltonian families
+--------------------------
+
+.. autosummary::
+    :toctree:
+
+    HamiltonianFamily
+    Anisohub

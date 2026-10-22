@@ -1,12 +1,24 @@
-"""One trainable parameter set with persistent fixed-Hamiltonian state views."""
+"""One shared parameter set with dynamic batched coupling inputs."""
 
 from collections.abc import Sequence
 from pathlib import Path
 from typing import BinaryIO, Callable
 import jax
+import equinox as eqx
 import jax.numpy as jnp
-from ..utils import LogArray
-from .variational import Variational
+from ..utils import (
+    LogArray,
+    PsiArray,
+    jit_chunk_vmap,
+    to_distributed_array,
+    array_extend,
+    filter_tree_map,
+    tree_fully_flatten,
+    tree_split_cpl,
+    tree_combine_cpl,
+)
+from ..global_defs import get_default_dtype
+from .variational import Variational, VS_TYPE
 from ..model.foundation import Conditioned, coupling_tuple
 
 
@@ -27,8 +39,9 @@ class Foundation(Variational):
 
     The supplied model accepts two positional arrays: spins and couplings. All
     states share one geometry, particle sector, parameter layout and symmetry.
-    Arbitrary changing/disordered coupling fields and varying sizes are not yet
-    supported efficiently: new coupling tuples get separate compiled views.
+    ``evaluate`` and ``jacobian_at`` accept dynamic coupling batches and share
+    compiled kernels across grid values. ``at`` remains a static compatibility
+    interface. Varying system sizes or coupling dimensions require a new state.
     """
 
     def __init__(
@@ -42,6 +55,7 @@ class Foundation(Variational):
         self._view_options = dict(kwargs)
         super().__init__(Conditioned(model, couplings), param_file=param_file, **kwargs)
         self._coupling_size = len(coupling_tuple(couplings))
+        self._init_context_kernels()
 
     @property
     def conditional_model(self):
@@ -125,3 +139,113 @@ class Foundation(Variational):
         w = w / w.sum()
         centered = O - jnp.sum(w[:, None] * O, axis=0)
         return centered.conj().T @ (w[:, None] * centered)
+
+    @property
+    def coupling_size(self) -> int:
+        """Number of dynamic physical conditioning inputs."""
+        return self._coupling_size
+
+    def _init_context_kernels(self):
+        def projected(network, spin, context):
+            transformed = self.symm.get_symm_spins(spin)
+            amplitudes = jax.vmap(lambda s: network(s, context))(transformed)
+            return self.symm.symmetrize(amplitudes, spin).astype(get_default_dtype())
+
+        def derivative(network, spin, context):
+            params, static = eqx.partition(network, eqx.is_inexact_array)
+
+            def surrogate(params):
+                psi = projected(eqx.combine(params, static), spin, context)
+                if isinstance(psi, LogArray):
+                    return psi.sign / jax.lax.stop_gradient(psi.sign) + psi.logabs
+                return psi / jax.lax.stop_gradient(psi)
+
+            if self.vs_type == VS_TYPE.real_or_holomorphic:
+                gradient = jax.grad(surrogate, holomorphic=self.holomorphic)(params)
+                result = tree_fully_flatten(gradient)
+            elif self.vs_type == VS_TYPE.real_to_complex:
+                real = jax.grad(lambda p: surrogate(p).real)(params)
+                imag = jax.grad(lambda p: surrogate(p).imag)(params)
+                result = jax.lax.complex(
+                    tree_fully_flatten(real), tree_fully_flatten(imag)
+                )
+            else:
+                real, imag = tree_split_cpl(params)
+                combined = lambda r, i: surrogate(tree_combine_cpl(r, i))
+                dr = jax.grad(lambda r, i: combined(r, i).real, argnums=(0, 1))(
+                    real, imag
+                )
+                di = jax.grad(lambda r, i: combined(r, i).imag, argnums=(0, 1))(
+                    real, imag
+                )
+                result = jnp.concatenate(
+                    [
+                        jax.lax.complex(
+                            tree_fully_flatten(dr[0]), tree_fully_flatten(di[0])
+                        ),
+                        jax.lax.complex(
+                            tree_fully_flatten(dr[1]), tree_fully_flatten(di[1])
+                        ),
+                    ]
+                )
+            return result.astype(get_default_dtype())
+
+        self._context_forward = jit_chunk_vmap(
+            projected,
+            in_axes=(None, 0, 0),
+            chunk_size=self.forward_chunk,
+            shard_batch=True,
+        )
+        self._context_jacobian = jit_chunk_vmap(
+            derivative,
+            in_axes=(None, 0, 0),
+            chunk_size=self.backward_chunk,
+            shard_batch=True,
+        )
+
+    def _context_inputs(self, spins, couplings):
+        spins, context = jnp.asarray(spins), jnp.asarray(couplings)
+        if spins.shape[-1:] != (self.Nmodes,) or context.shape[-1:] != (
+            self.coupling_size,
+        ):
+            raise ValueError(
+                "Configuration or coupling dimension does not match the family"
+            )
+        shape = spins.shape[:-1]
+        if context.ndim > spins.ndim:
+            raise ValueError("Too many coupling batch dimensions")
+        context = context.reshape(
+            *context.shape[:-1],
+            *([1] * (spins.ndim - context.ndim)),
+            self.coupling_size,
+        )
+        context = jnp.broadcast_to(context, (*shape, self.coupling_size))
+        spins, context = spins.reshape(-1, self.Nmodes), context.reshape(
+            -1, self.coupling_size
+        )
+        if not spins.shape[0]:
+            raise ValueError("Configuration batches must be nonempty")
+        return shape, spins, context
+
+    def evaluate(self, spins, couplings) -> PsiArray:
+        """Evaluate all configurations with dynamic contexts in one batched kernel.
+
+        ``spins`` may have shape (R,S,Nmodes), and ``couplings`` (R,C), or
+        one context per configuration. Coupling values do not enter compilation
+        cache keys. Outputs retain the leading configuration axes.
+        """
+        shape, spins, context = self._context_inputs(spins, couplings)
+        count = spins.shape[0]
+        spins = to_distributed_array(array_extend(spins, jax.device_count()))
+        context = to_distributed_array(array_extend(context, jax.device_count()))
+        out = self._context_forward(self.conditional_model, spins, context)
+        return filter_tree_map(lambda x: x[:count].reshape(shape), out)
+
+    def jacobian_at(self, spins, couplings) -> jax.Array:
+        """Batched log derivatives at dynamic contexts, shape (..., Nparameters)."""
+        shape, spins, context = self._context_inputs(spins, couplings)
+        count = spins.shape[0]
+        spins = to_distributed_array(array_extend(spins, jax.device_count()))
+        context = to_distributed_array(array_extend(context, jax.device_count()))
+        out = self._context_jacobian(self.conditional_model, spins, context)
+        return out[:count].reshape(*shape, out.shape[-1])

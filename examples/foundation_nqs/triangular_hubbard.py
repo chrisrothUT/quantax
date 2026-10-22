@@ -43,10 +43,10 @@ def build(
     samples_per_system=128,
     C0=0.1,
 ):
-    """Create geometry once, a conditional state, joint optimizer and samplers.
+    """Create geometry once, a conditional state, joint optimizer and a batched sampler.
 
     Call in a fresh interpreter (Quantax has one global Hilbert space). Physical
-    couplings map explicitly to network inputs (U/10,t_prime). Change these
+    couplings remain (U,t_prime); model coupling_scale handles normalization. Change these
     grids for an exploratory calculation; this function schedules no work.
     Outputs follow the product order U_values x t_prime_values.
     """
@@ -61,7 +61,8 @@ def build(
     lattice = qtx.sites.Triangular(
         (L, L), particle_type="spinful_fermion", Nparticles=(L * L // 2, L * L // 2)
     )
-    contexts = [(float(U) / 10.0, float(tp)) for U, tp in physical]
+    hamiltonians = qtx.operator.Anisohub(U_values, t_prime_values)
+    contexts = hamiltonians.couplings
     model = qtx.model.ConditionalTransformer(
         2,
         dim=dim,
@@ -70,24 +71,25 @@ def build(
         patch_size=2,
         complex_output=True,
         dtype=jnp.float32,
+        coupling_scale=(10.0, 1.0),
     )
     state = qtx.state.Foundation(model, contexts[0], max_parallel=(128, 16, 128))
-    hamiltonians = [anisotropic_hubbard(lattice, U, tp) for U, tp in physical]
     optimizer = qtx.optimizer.FoundationSR(
         state,
         hamiltonians,
-        contexts,
         C0=C0,
         updater=qtx.optimizer.AdamUpdater(mu=0.95, beta=0.995),
         clip_mode="median_mad",
     )
-    samplers = [
-        qtx.sampler.ParticleHop(
-            view, nsamples=samples_per_system, thermal_steps=0, sweep_steps=4 * L * L
-        )
-        for view in optimizer.states
-    ]
-    return lattice, state, optimizer, samplers, physical
+    sampler = qtx.sampler.FamilyMetropolis(
+        state,
+        contexts,
+        samples_per_coupling=samples_per_system,
+        kind="particle_hop",
+        thermal_steps=0,
+        sweep_steps=4 * L * L,
+    )
+    return lattice, state, optimizer, sampler, hamiltonians
 
 
 if __name__ == "__main__":

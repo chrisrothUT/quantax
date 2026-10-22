@@ -39,3 +39,12 @@ Metropolis samplers
     ParticleHopDn
     SiteExchange
     SiteFlip
+
+Batched Hamiltonian families
+--------------------------
+
+.. autosummary::
+    :toctree:
+
+    FamilySamples
+    FamilyMetropolis

@@ -28,23 +28,25 @@ before constructing a different lattice or rerunning the geometry initialization
 ## Public interface
 
 ```python
+import numpy as np
+# Initialize a periodic spinful triangular lattice at balanced half filling first.
+H = qtx.operator.Anisohub(
+    U=np.linspace(4, 16, 20), t_prime=np.linspace(0.8, 1, 20),
+)
 model = qtx.model.ConditionalTransformer(
-    ncouplings=1, dim=32, heads=4, layers=2, patch_size=2,
+    2, dim=32, heads=4, layers=2, complex_output=True,
+    coupling_scale=(10, 1),
 )
-family = qtx.state.Foundation(model, couplings=[0.8])
-conditions = [[0.8], [1.0], [1.2]]
-operators = [qtx.operator.Ising(h=g[0]) for g in conditions]
-optimizer = qtx.optimizer.FoundationSR(
-    family, operators, conditions, C0=0.1,
-    updater=qtx.optimizer.AdamUpdater(mu=0.95, beta=0.995),
-    clip_mode="median_mad",
+family = qtx.state.Foundation(model, H.couplings[0])
+optimizer = qtx.optimizer.FoundationSR(family, H, C0=0.1)
+sampler = qtx.sampler.FamilyMetropolis(
+    family, H.couplings, samples_per_coupling=128,
+    kind="particle_hop", thermal_steps=100,
 )
-samplers = [qtx.sampler.LocalFlip(view, nsamples=128)
-            for view in optimizer.states]
 for iteration in range(100):
-    samples = [sampler.sweep() for sampler in samplers]
+    samples = sampler.sweep()  # (400, 128, Nmodes)
     family.update(optimizer.get_step(samples))
-    print(optimizer.energies, optimizer.variances)
+    print(optimizer.energies.reshape(H.grid_shape))
 ```
 
 Initialize a geometry and dtype before this code, as in any Quantax workflow.
@@ -54,20 +56,41 @@ Every trainable array is real; the model represents log magnitude and phase with
 two real output channels. Inputs follow Quantax's +/-1 occupation convention.
 
 - `family.at(gamma)` returns a persistent **read-only** Variational view. Use one
-  sampler per view, and update the family once. Existing samplers see new weights.
+  sampler per view for legacy workflows. The batched family path needs no views.
 - `family.detach(gamma)` produces an independent Variational state for ordinary
   single-Hamiltonian fine-tuning, without modifying the family.
 - `qtx.model.Conditioned(your_model, gamma)` also binds any two-input model for
   standalone Variational use. The family API is architecture-agnostic.
-- Physical couplings are **not trainable leaves**. Scale them explicitly, e.g.
-  encode a triangular Hubbard point as `(U/10, t_prime)`.
+- Physical couplings are **not trainable leaves**. Keep physical `(U, t_prime)` inputs and
+  set `coupling_scale=(10, 1)` in ConditionalTransformer.
 - `weights=` in FoundationSR selects the probability of each Hamiltonian. Sample
-  counts can differ without changing those probabilities. Positive finite system
+  counts can differ in the legacy list interface; the batched path uses equal
+  counts per point. Positive finite system
   weights are normalized to sum to one.
 - `family.coupling_qgt(gamma, spins, weights=None)` returns the coupling-space
   quantum geometric tensor. Its real part is the fidelity metric. Configurations
   must come from the current state at gamma, or use exact Born weights. This
   measures the learned family and can mislead if interpolation is inaccurate.
+
+
+## Batched operator basis
+
+`Anisohub` builds `H = t*T_diagonal + t_prime*T_x + U*D`. Two one-dimensional
+axes produce their Cartesian product (U first, t_prime second); use
+`cartesian=False` for paired broadcastable inputs. The distinct bond is along
+physical x. `H.local_terms(family, samples)` returns `(R,S,3)` local energies
+from one batched application of the fixed operator basis. `H.combine(terms)`
+forms `(R,S)` Hamiltonian local energies using each row's coefficients. The
+optimizer reports per-point `energies`, `variances` and `term_energies`.
+
+Each ratio uses the wavefunction conditioned on that sample's own coupling.
+The operator connectivity and compiled kernels are shared; values for different
+wavefunctions are evaluated separately along batch axes. Variances use the
+combined local energies, preserving covariance between hopping and occupancy.
+`HamiltonianFamily(terms, coefficients, couplings)` provides the same mechanism
+for other linearly parameterized models. `sample_chunk` bounds configurations
+per device in each connection batch; Foundation's `max_parallel` bounds neural forward/Jacobian
+chunks. On multiple devices total `R*S` must divide evenly over devices.
 
 ## The joint SR equation
 
@@ -102,7 +125,7 @@ Hamiltonians, updater settings and normalizations explicitly: static context
 values are not stored as trainable parameters in the Equinox checkpoint.
 For an exact MCMC restart also preserve every sampler endpoint, proposal settings,
 Quantax's PRNG key, accepted iteration and training history. Restore endpoints
-with `sampler.reset(initial_spins=..., nsweeps=0)` and restore the saved RNG after
+with `sampler.reset(initial_spins=...)` for FamilyMetropolis and restore the saved RNG after
 constructing states/samplers. The exact-sum benchmark does not require Markov
 chain checkpoints. Existing Organics checkpoints cannot be loaded directly into
 this new architecture.
@@ -111,8 +134,8 @@ this new architecture.
 
 `examples/foundation_nqs/triangular_hubbard.py` provides `build()` for a standard
 even L×L triangular torus at balanced half filling. It retains t_prime along x,
-uses inputs `(U/10, t_prime)`, creates complex-output states and one ParticleHop
-sampler per point. Run it in a fresh interpreter, enable JAX x64 first, and choose
+uses physical inputs `(U, t_prime)` with model normalization, creates complex-output
+states and one FamilyMetropolis sampler across the entire grid. Run it in a fresh interpreter, enable JAX x64 first, and choose
 the physical grid deliberately. Thermalize every sampler before optimization.
 The helper does not launch training or submit Slurm jobs. Its positive example
 values are a template, not a recommendation to restart the canceled campaign.
@@ -124,10 +147,10 @@ values are a template, not a recommendation to restart the canceled campaign.
 - Learned absolute positional embeddings and standard attention, rather than the
   paper's specialized translation-invariant attention. Symmetry is not imposed
   unless a compatible common symmetry is passed to the family explicitly.
-- Each distinct coupling tuple has a separate cached compiled state view.
-  Per-system sampling and Jacobian evaluation are sequential in Python. This is
-  suitable for a modest fixed grid, not the paper's thousand-system throughput.
-  Dynamic-context batched evaluation is a further optimization.
+- Work and Jacobian storage still scale with total samples across the grid.
+  Couplings are dynamic arrays: sampling, forward passes and Jacobians share
+  compiled kernels. Physical configurations and connected amplitudes are chunked
+  on device; there is no Python evaluation loop per Hamiltonian.
 - No pretrained triangular Hubbard model is delivered. Generalization across
   a phase boundary and retention of competing minima need scientific validation.
 - A complex Transformer in the fermion Fock basis is supported, but it has not

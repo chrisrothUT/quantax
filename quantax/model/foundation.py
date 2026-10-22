@@ -89,6 +89,7 @@ class ConditionalTransformer(eqx.Module):
     nmodes: int = eqx.field(static=True)
     patch_size: int = eqx.field(static=True)
     complex_output: bool = eqx.field(static=True)
+    coupling_scale: tuple[float, ...] = eqx.field(static=True)
 
     def __init__(
         self,
@@ -100,6 +101,7 @@ class ConditionalTransformer(eqx.Module):
         patch_size: int = 2,
         complex_output: bool = False,
         dtype: DTypeLike = jnp.float32,
+        coupling_scale: Sequence[float] | None = None,
     ):
         nmodes = get_sites().Nmodes
         if any(
@@ -117,6 +119,16 @@ class ConditionalTransformer(eqx.Module):
             )
         if not jnp.issubdtype(dtype, jnp.floating):
             raise ValueError("Transformer parameters must be real floating arrays")
+        scale = (
+            (1.0,) * ncouplings
+            if coupling_scale is None
+            else coupling_tuple(coupling_scale)
+        )
+        if len(scale) != ncouplings or any(x <= 0 for x in scale):
+            raise ValueError(
+                "coupling_scale must contain one finite positive value per coupling"
+            )
+        self.coupling_scale = scale
         self.ncouplings, self.nmodes = ncouplings, nmodes
         self.patch_size, self.complex_output = patch_size, complex_output
         self.embedding = eqx.nn.Linear(
@@ -139,7 +151,8 @@ class ConditionalTransformer(eqx.Module):
         dtype = self.embedding.weight.dtype
         patches = spins.astype(dtype).reshape(-1, self.patch_size)
         context = jnp.broadcast_to(
-            couplings.astype(dtype), (len(patches), self.ncouplings)
+            couplings.astype(dtype) / jnp.asarray(self.coupling_scale, dtype=dtype),
+            (len(patches), self.ncouplings),
         )
         x = (
             jax.vmap(self.embedding)(jnp.concatenate([patches, context], axis=1))

@@ -21,11 +21,16 @@ def train(steps=120, sites=6, output=None):
     )
     state = qtx.state.Foundation(model, [0.6], max_parallel=(64, 16, 64))
     fields = np.array([0.6, 1.0, 1.4])
-    H = [qtx.operator.Ising(h=float(h)) for h in fields]
+    H = qtx.operator.HamiltonianFamily(
+        [qtx.operator.Ising(h=0), qtx.operator.Ising(J=0, h=1)],
+        np.stack([np.ones_like(fields), fields], axis=-1),
+        fields[:, None],
+        term_names=("T_zz", "T_x"),
+        sample_chunk=16,
+    )
     optimizer = qtx.optimizer.FoundationSR(
         state,
         H,
-        [[float(h)] for h in fields],
         clip=None,
         C0=1.0,
         solver=qtx.optimizer.auto_shift_eig(ashift=1e-3),
@@ -34,13 +39,12 @@ def train(steps=120, sites=6, output=None):
     symm.basis_make()
     spins = qtx.utils.to_distributed_array(qtx.utils.ints_to_array(symm.basis.states))
     reference = np.array([np.linalg.eigvalsh(h.todense())[0] for h in H])
+    family_spins = jnp.broadcast_to(spins, (len(fields), *spins.shape))
     history = []
     for iteration in range(steps):
-        batches = []
-        for view in optimizer.states:
-            psi = view(spins)
-            probability = jax.nn.softmax(2 * psi.logabs)
-            batches.append(qtx.sampler.Samples(spins, reweight_factor=probability))
+        psi = state.evaluate(family_spins, H.couplings)
+        probability = jax.nn.softmax(2 * psi.logabs, axis=1)
+        batches = qtx.sampler.FamilySamples(family_spins, probability)
         update = optimizer.get_step(batches)
         history.append(np.asarray(optimizer.energies))
         state.update(0.1 * update)
@@ -49,10 +53,11 @@ def train(steps=120, sites=6, output=None):
     test_fields = np.array([0.6, 0.8, 1.0, 1.2, 1.4])
     predictions = []
     exact = []
-    for h in test_fields:
+    test_spins = jnp.broadcast_to(spins, (len(test_fields), *spins.shape))
+    test_psi = np.asarray(state.evaluate(test_spins, test_fields[:, None]))
+    for h, psi in zip(test_fields, test_psi):
         op = qtx.operator.Ising(h=float(h))
         matrix = op.todense()
-        psi = np.asarray(state.at([float(h)])(spins))
         psi = psi / np.linalg.norm(psi)
         predictions.append(float(np.vdot(psi, matrix @ psi).real))
         exact.append(float(np.linalg.eigvalsh(matrix)[0]))
@@ -60,6 +65,8 @@ def train(steps=120, sites=6, output=None):
         sites=sites,
         steps=steps,
         parameters=state.nparams,
+        batched_hamiltonian_basis=True,
+        bound_views_created=len(state._views),
         training_fields=fields.tolist(),
         evaluated_fields=test_fields.tolist(),
         variational_energies=predictions,
