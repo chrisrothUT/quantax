@@ -45,7 +45,7 @@ You don't have to follow them one by one. Feel free to jump to the ones that int
 
 Examples
 ==========
-The examples below reproduce the main results of several important NQS papers.
+The examples below demonstrate NQS methods and implementations inspired by research papers.
 
 .. toctree::
    :maxdepth: 1
@@ -54,6 +54,7 @@ The examples below reproduce the main results of several important NQS papers.
    examples/TDVP
    examples/MinSR
    examples/Backflow
+   examples/foundation_nqs
 
 API
 ===

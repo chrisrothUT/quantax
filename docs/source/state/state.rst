@@ -40,3 +40,12 @@ Mean-field states
     GeneralPfState
     SingletPairState
     MultiPfState
+
+
+Foundation families
+-------------------
+
+.. autosummary::
+    :toctree:
+
+    Foundation

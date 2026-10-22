@@ -84,3 +84,12 @@ Non-iterative solvers
     auto_pinv_eig
     block_pinv_eig
     sgd_solver
+
+
+Foundation families
+-------------------
+
+.. autosummary::
+    :toctree:
+
+    FoundationSR

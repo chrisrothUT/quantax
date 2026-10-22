@@ -18,3 +18,5 @@ from .solver import (
     block_pinv_eig,
     sgd_solver,
 )
+
+from .foundation import FoundationSR

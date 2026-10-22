@@ -56,3 +56,13 @@ Jastrow factors
 
     Jastrow
     GeneralJastrow
+
+
+Foundation families
+-------------------
+
+.. autosummary::
+    :toctree:
+
+    ConditionalTransformer
+    Conditioned
