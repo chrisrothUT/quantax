@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-square-twist
-#SBATCH --partition=gpu,gpuxl
+#SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:2
