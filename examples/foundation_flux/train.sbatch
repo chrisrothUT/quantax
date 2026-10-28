@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=foundation-square-twist
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu,gpuxl
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:4
 #SBATCH --constraint=h100
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=192G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=256G
 #SBATCH --time=08:00:00
 #SBATCH --signal=USR1@900
 #SBATCH --chdir=/mnt/ceph/users/croth/FoundationTwist/calculation
