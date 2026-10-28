@@ -15,6 +15,8 @@ set -euo pipefail
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=1 JAX_ENABLE_X64=true
 export JAX_PLATFORMS=cuda XLA_PYTHON_CLIENT_PREALLOCATE=true XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
 export PYTHONPATH=/mnt/ceph/users/croth/FoundationTwist/quantax:/mnt/ceph/users/croth/FoundationTwist/quantax/examples/foundation_flux
+# Avoid extra full-Jacobian buffers allocated by GPU autotuning.
+export XLA_FLAGS="--xla_gpu_autotune_level=0"
 export JAX_COMPILATION_CACHE_DIR="$PWD/jax_cache"
 PYTHON=/mnt/home/croth/miniconda3/envs/quantax_new/bin/python
 SCRIPT=../quantax/examples/foundation_flux/run_training.py
