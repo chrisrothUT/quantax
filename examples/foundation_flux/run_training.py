@@ -134,11 +134,11 @@ def main():
         print(json.dumps(config, indent=2), flush=True)
         return
     if not args.smoke and (
-        len(jax.devices()) != 4
+        len(jax.devices()) != 2
         or not all("H100" in x.device_kind for x in jax.devices())
     ):
         raise RuntimeError(
-            "Requires exactly four H100 GPUs; no CPU or other-GPU fallback"
+            "Requires exactly two H100 GPUs; no CPU or other-GPU fallback"
         )
     latest = json.loads((out / "latest.json").read_text()) if args.resume else None
     if not args.resume and (out / "latest.json").exists():

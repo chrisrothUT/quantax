@@ -16,7 +16,7 @@ CNN parameters are float32; pairing is complex128 to represent twist phases,
 with real and imaginary pairing weights stored as real trainable arrays.
 No point-group projection or pinning. Seed 3232; target 20,000 iterations.
 
-Run on **four H100 GPUs** using the batch launcher in the FoundationTwist
+Run on **two H100 GPUs**, in 8-hour allocations with checkpointed continuation using the batch launcher in the FoundationTwist
 calculation directory. It checks the full-size forward pass, then reduced-size
 training/restart before production. Set PYTHONPATH to this checkout and this
 example directory; FOUNDATION_RUN_DIR defaults to the working directory.
