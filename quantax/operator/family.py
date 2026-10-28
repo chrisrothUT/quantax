@@ -6,11 +6,10 @@ from operator import index as integer_index
 import numpy as np
 import jax
 import jax.numpy as jnp
-import equinox as eqx
-from .operator import Operator, OpTermJAX, _apply_diag, _apply_off_diag
-from .update_mode_filters import none_filter
+from .operator import Operator
 from ..sampler.family_samples import FamilySamples
-from ..utils import chunk_map, to_distributed_array
+from ..sampler.samples import Samples
+from ..utils import to_distributed_array
 from ..global_defs import get_lattice, get_sites, PARTICLE_TYPE
 
 if TYPE_CHECKING:
@@ -23,13 +22,14 @@ class HamiltonianFamily:
     A fixed small operator basis is applied to *all* configurations and dynamic
     contexts at once. Only the operator-basis loop is in Python; there is no
     loop over Hamiltonians or separate bound-state evaluation per grid point.
-    Connections for all basis terms are merged before evaluating amplitudes.
-    Per-device physical-configuration chunks and the state's connection-forward chunks
-    bound memory without splitting work into Python calls per Hamiltonian.
+    Each fixed basis term uses the ordinary Operator.Oloc path, including valid
+    connection compaction and native chunking. Only coefficient combinations
+    differ. No Python loop dispatches individual Hamiltonians.
 
     coefficients has shape (*grid_shape,A), couplings (*grid_shape,C). Public
     couplings/coefficients are flattened to (R,C)/(R,A); expectation results
-    recover grid_shape. Samples have shape (R,S,Nmodes).
+    recover grid_shape. Samples have shape (R,S,Nmodes). ``sample_chunk`` is
+    accepted for compatibility; native forward/ref chunk sizes govern evaluation.
     """
 
     def __init__(
@@ -71,30 +71,6 @@ class HamiltonianFamily:
         if len(self.term_names) != len(terms):
             raise ValueError("Provide one name per operator basis term")
         self.sample_chunk = sample_chunk
-        self._kernel_cache = {}
-        self._diagonal = []
-        self._rows = []
-        transpose = str.maketrans("+-", "-+")
-        for op in terms:
-            op.apply_update_mode_filter(none_filter)
-            entries = op.jax_op_list
-            self._diagonal.append(entries)
-            self._rows.append(
-                [
-                    (
-                        mode,
-                        tuple(
-                            OpTermJAX(
-                                term.opstr.translate(transpose)[::-1],
-                                term.strength * (-1) ** term.opstr.count("y"),
-                                term.indices[:, ::-1],
-                            )
-                            for term in group
-                        ),
-                    )
-                    for mode, group in entries
-                ]
-            )
 
     def __len__(self):
         return self.nsystems
@@ -122,59 +98,6 @@ class HamiltonianFamily:
             Operator([]),
         )
 
-    def _kernel(self, state):
-        key = id(state)
-        if key in self._kernel_cache:
-            return self._kernel_cache[key]
-
-        def batch_terms(network, spins, contexts):
-            diagonal = jnp.stack(
-                [_apply_diag(spins, entries) for entries in self._diagonal], axis=-1
-            )
-            connections = []
-            strengths = []
-            labels = []
-            for i, entries in enumerate(self._rows):
-                for _, connected, strength in _apply_off_diag(spins, entries):
-                    valid = jnp.isfinite(strength) & (strength != 0)
-                    connected = jnp.where(
-                        valid[..., None], connected, spins[:, None, :]
-                    )
-                    connections.append(connected)
-                    strengths.append(jnp.where(valid, strength, 0))
-                    labels.extend([i] * strength.shape[1])
-            if not connections:
-                return diagonal
-            connected = jnp.concatenate(connections, axis=1)
-            strength = jnp.concatenate(strengths, axis=1)
-            nconfigs, nconn, nmodes = connected.shape
-            context = jnp.broadcast_to(
-                contexts[:, None, :], (nconfigs, nconn, contexts.shape[-1])
-            )
-            psi = state._context_forward(network, spins, contexts)
-            psi_connected = state._context_forward(
-                network,
-                connected.reshape(-1, nmodes),
-                context.reshape(-1, contexts.shape[-1]),
-            )
-            ratio = jnp.asarray(psi_connected.reshape(nconfigs, nconn) / psi[:, None])
-            # Label each connection by its original basis operator. The diagonal
-            # double-occupancy term never requires a wavefunction evaluation.
-            selector = jax.nn.one_hot(jnp.asarray(labels), len(self.terms))
-            return diagonal + (ratio * strength) @ selector
-
-        fn = eqx.filter_jit(
-            chunk_map(
-                batch_terms,
-                in_axes=(None, 0, 0),
-                chunk_size=self.sample_chunk,
-                use_scan=True,
-                shard_batch=False,
-            )
-        )
-        self._kernel_cache[key] = fn
-        return fn
-
     def local_terms(self, state: "Foundation", samples, *, couplings=None):
         """Return every basis local energy, shape (R,S,A), from a joint pass."""
         spins = (
@@ -195,10 +118,12 @@ class HamiltonianFamily:
         _, flat, context = state._context_inputs(spins, contexts)
         if flat.shape[0] % jax.device_count():
             raise ValueError("Total samples must divide evenly across devices")
-        result = self._kernel(state)(
-            state.conditional_model,
-            to_distributed_array(flat),
-            to_distributed_array(context),
+        flat, context = to_distributed_array(flat), to_distributed_array(context)
+        # Compute denominators once; every fixed basis uses the same native
+        # valid-connection compaction, forward chunking and segment reduction.
+        batch = Samples(flat, state.evaluate(flat, context))
+        result = jnp.stack(
+            [term.Oloc(state, batch, contexts=context) for term in self.terms], axis=-1
         )
         return result.reshape(self.nsystems, spins.shape[1], len(self.terms))
 

@@ -49,6 +49,7 @@ class MultiplicativePfBackflow(eqx.Module):
     d: int = eqx.field(static=True)
     dtype: DTypeLike = eqx.field(static=True)
     opposite_spin: bool = eqx.field(static=True)
+    output_softmax_gate: bool = eqx.field(static=True)
     _nlabels: int = eqx.field(static=True)
     _nspecies: int = eqx.field(static=True)
     _distances: tuple[float, ...] = eqx.field(static=True)
@@ -63,12 +64,15 @@ class MultiplicativePfBackflow(eqx.Module):
         decay: float = 1.0,
         opposite_spin: bool = False,
         dtype: DTypeLike = jnp.float64,
+        *,
+        output_softmax_gate: bool = False,
     ):
         """Initialize the pairing head.
 
         :param net:
             Network mapping a Quantax +/-1 configuration to channels-first
-            features of shape ``(nspecies * nsites_per_cell * d, *extent)``.
+            features of shape ``(nspecies * nsites_per_cell * d, *extent)``
+            (replace d by 2*d with output_softmax_gate enabled).
             Channel order is ``(spin, site_in_cell, feature)``; flattening the
             trailing spatial axes uses the original lattice ordering.
         :param d: Number of features per spin-orbital (not total CNN channels).
@@ -79,6 +83,9 @@ class MultiplicativePfBackflow(eqx.Module):
             Keep only opposite-spin weights, recovering the BCS determinant
             up to a configuration-independent sign in a balanced spin sector.
             This restriction alone does not enforce spin-singlet symmetry.
+        :param output_softmax_gate: Split 2*d output features per spin-orbital into
+            logits and signed values. Multiply softmax(logits) over d by values
+            before contracting the pairing kernels. The default uses d outputs.
         :param dtype: Real or complex pairing parameter / Pfaffian precision.
         """
         lattice = get_lattice()
@@ -103,6 +110,7 @@ class MultiplicativePfBackflow(eqx.Module):
 
         self.net, self.d, self.dtype = net, d, dtype
         self.opposite_spin = opposite_spin
+        self.output_softmax_gate = output_softmax_gate
         ns = 2 if lattice.is_spinful else 1
         nb, nc = lattice.shape[0], lattice.ncells
         q = ns * nb
@@ -165,6 +173,8 @@ class MultiplicativePfBackflow(eqx.Module):
         opposite_spin: bool = False,
         dtype: DTypeLike = jnp.float32,
         pairing_dtype: DTypeLike = jnp.float64,
+        *,
+        output_softmax_gate: bool = False,
     ) -> "MultiplicativePfBackflow":
         """Build a complete residual-CNN Pfaffian wavefunction.
 
@@ -176,7 +186,9 @@ class MultiplicativePfBackflow(eqx.Module):
         Enable JAX x64 before using float64/complex128.
         Other arguments have the same meaning as in ``ResConv`` / ``__init__``.
         The final 1x1 convolution emits the up/down feature halves without a
-        spatial sum, exponential activation, or symmetry projection.
+        spatial sum or symmetry projection. With ``output_softmax_gate=True``,
+        it emits 2*d channels per spin-orbital, split into alpha logits and
+        signed values before the pairing contraction.
         """
         if nblocks < 0 or channels <= 0:
             raise ValueError("nblocks must be nonnegative and channels positive.")
@@ -201,7 +213,7 @@ class MultiplicativePfBackflow(eqx.Module):
                 lambda x: x / (nblocks + 1) ** 0.5,
                 Conv(
                     channels,
-                    ns * lattice.shape[0] * d,
+                    ns * lattice.shape[0] * d * (2 if output_softmax_gate else 1),
                     1,
                     dtype=dtype,
                     key=get_subkeys(),
@@ -209,7 +221,14 @@ class MultiplicativePfBackflow(eqx.Module):
                 lattice.to_original_repr,
             ]
         )
-        return cls(Sequential(layers), d, decay, opposite_spin, pairing_dtype)
+        return cls(
+            Sequential(layers),
+            d,
+            decay,
+            opposite_spin,
+            pairing_dtype,
+            output_softmax_gate=output_softmax_gate,
+        )
 
     @property
     def weights(self) -> jax.Array:
@@ -252,8 +271,12 @@ class MultiplicativePfBackflow(eqx.Module):
         """
         lattice = get_lattice()
         y = jnp.asarray(self.net(s)).astype(self.dtype)
-        y = y.reshape(self._nlabels, self.d, lattice.ncells)
-        y = y.transpose(0, 2, 1).reshape(lattice.Nfmodes, self.d)
+        nfeatures = self.d * (2 if self.output_softmax_gate else 1)
+        y = y.reshape(self._nlabels, nfeatures, lattice.ncells)
+        y = y.transpose(0, 2, 1).reshape(lattice.Nfmodes, nfeatures)
+        if self.output_softmax_gate:
+            logits, values = jnp.split(y, 2, axis=-1)
+            y = jax.nn.softmax(logits, axis=-1) * values
         idx = (
             jnp.asarray(fermion_idx(s))
             if occupied_only

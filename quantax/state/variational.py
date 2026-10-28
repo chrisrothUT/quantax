@@ -272,18 +272,67 @@ class Variational(State):
                     " the model."
                 )
 
+    def _projected_one(self, model: Callable, s: jax.Array, context=None) -> PsiArray:
+        """Symmetry projection shared by native and dynamically conditioned states."""
+        transformed = self.symm.get_symm_spins(s)
+        if context is None:
+            psi = jax.vmap(model)(transformed)
+        else:
+            psi = jax.vmap(model, in_axes=(0, None))(transformed, context)
+        return self.symm.symmetrize(psi, s)
+
+    def _forward_one(self, model: Callable, s: jax.Array, context=None) -> PsiArray:
+        return self._projected_one(model, s, context).astype(get_default_dtype())
+
+    def _log_derivative_one(
+        self, model: eqx.Module, s: jax.Array, context=None
+    ) -> jax.Array:
+        def log_psi(model: Callable[[jax.Array], PsiArray]) -> jax.Array:
+            psi = self._projected_one(model, s, context)
+            # A surrogate for log(psi) whose gradient is (1/psi) dpsi/dtheta,
+            # while the value itself stays O(1) and never overflows. The
+            # ``sign / stop_gradient(sign)`` term contributes the phase
+            # gradient and the ``logabs`` term the magnitude.
+            if isinstance(psi, LogArray):
+                return psi.sign / jax.lax.stop_gradient(psi.sign) + psi.logabs
+            psi = jnp.asarray(psi)
+            return psi / jax.lax.stop_gradient(psi)
+
+        params, static = eqx.partition(model, eqx.is_inexact_array)
+        out_fn = lambda params: log_psi(eqx.combine(params, static))
+
+        if self.vs_type == VS_TYPE.real_or_holomorphic:
+            grad = jax.grad(out_fn, holomorphic=self.holomorphic)(params)
+            grad = tree_fully_flatten(grad)
+        elif self.vs_type == VS_TYPE.real_to_complex:
+            grad_real = jax.grad(lambda p: out_fn(p).real)(params)
+            grad_imag = jax.grad(lambda p: out_fn(p).imag)(params)
+            grad = jax.lax.complex(
+                tree_fully_flatten(grad_real), tree_fully_flatten(grad_imag)
+            )
+        else:  # non_holomorphic: stack derivatives w.r.t. Re(theta), Im(theta)
+            params_real, params_imag = tree_split_cpl(params)
+            out_ri = lambda pr, pi: out_fn(tree_combine_cpl(pr, pi))
+            grad_real = jax.grad(lambda pr, pi: out_ri(pr, pi).real, argnums=(0, 1))
+            grad_imag = jax.grad(lambda pr, pi: out_ri(pr, pi).imag, argnums=(0, 1))
+            dr = grad_real(params_real, params_imag)
+            di = grad_imag(params_real, params_imag)
+            grad_wrt_real = jax.lax.complex(
+                tree_fully_flatten(dr[0]), tree_fully_flatten(di[0])
+            )
+            grad_wrt_imag = jax.lax.complex(
+                tree_fully_flatten(dr[1]), tree_fully_flatten(di[1])
+            )
+            grad = jnp.concatenate([grad_wrt_real, grad_wrt_imag])
+
+        return grad.astype(get_default_dtype())
+
     def _init_forward(self, mesh: Mesh | None = None) -> None:
         if mesh is None:
             mesh = make_mesh()
         dist_sharding = NamedSharding(mesh, get_distributed_P())
 
-        def batch_forward(
-            model: Callable[[jax.Array], PsiArray], s: jax.Array
-        ) -> PsiArray:
-            s_symm = self.symm.get_symm_spins(s)
-            psi = jax.vmap(model)(s_symm)
-            psi = self.symm.symmetrize(psi, s)
-            return psi.astype(get_default_dtype())
+        batch_forward = self._forward_one
 
         # shmap: GSPMD can't partition opaque custom-calls (Pallas kernels), so it
         # all-gathers their operands and reruns the full global batch on every
@@ -532,49 +581,7 @@ class Variational(State):
         Generate functions for computing 1/ψ dψ/dθ.
         """
 
-        def grad_fn(model: eqx.Module, s: jax.Array) -> jax.Array:
-            s_symm = self.symm.get_symm_spins(s)
-
-            def log_psi(model: Callable[[jax.Array], PsiArray]) -> jax.Array:
-                psi = jax.vmap(model)(s_symm)
-                psi = self.symm.symmetrize(psi, s)
-                # A surrogate for log(psi) whose gradient is (1/psi) dpsi/dtheta,
-                # while the value itself stays O(1) and never overflows. The
-                # ``sign / stop_gradient(sign)`` term contributes the phase
-                # gradient and the ``logabs`` term the magnitude.
-                if isinstance(psi, LogArray):
-                    return psi.sign / jax.lax.stop_gradient(psi.sign) + psi.logabs
-                psi = jnp.asarray(psi)
-                return psi / jax.lax.stop_gradient(psi)
-
-            params, static = eqx.partition(model, eqx.is_inexact_array)
-            out_fn = lambda params: log_psi(eqx.combine(params, static))
-
-            if self.vs_type == VS_TYPE.real_or_holomorphic:
-                grad = jax.grad(out_fn, holomorphic=self.holomorphic)(params)
-                grad = tree_fully_flatten(grad)
-            elif self.vs_type == VS_TYPE.real_to_complex:
-                grad_real = jax.grad(lambda p: out_fn(p).real)(params)
-                grad_imag = jax.grad(lambda p: out_fn(p).imag)(params)
-                grad = jax.lax.complex(
-                    tree_fully_flatten(grad_real), tree_fully_flatten(grad_imag)
-                )
-            else:  # non_holomorphic: stack derivatives w.r.t. Re(theta), Im(theta)
-                params_real, params_imag = tree_split_cpl(params)
-                out_ri = lambda pr, pi: out_fn(tree_combine_cpl(pr, pi))
-                grad_real = jax.grad(lambda pr, pi: out_ri(pr, pi).real, argnums=(0, 1))
-                grad_imag = jax.grad(lambda pr, pi: out_ri(pr, pi).imag, argnums=(0, 1))
-                dr = grad_real(params_real, params_imag)
-                di = grad_imag(params_real, params_imag)
-                grad_wrt_real = jax.lax.complex(
-                    tree_fully_flatten(dr[0]), tree_fully_flatten(di[0])
-                )
-                grad_wrt_imag = jax.lax.complex(
-                    tree_fully_flatten(dr[1]), tree_fully_flatten(di[1])
-                )
-                grad = jnp.concatenate([grad_wrt_real, grad_wrt_imag])
-
-            return grad.astype(get_default_dtype())
+        grad_fn = self._log_derivative_one
 
         # shard_batch=True: the only chunk_map user that needs shard_map -- it keeps
         # each device's per-sample conv weight-gradient local, so GSPMD does not

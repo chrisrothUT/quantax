@@ -268,6 +268,19 @@ class Metropolis(Sampler):
     def _sweep_variational(
         self, key: Key, nsweeps: ArrayLike, spins: jax.Array, model: Callable
     ) -> Samples:
+        """Native sampler entry point; shared core also accepts dynamic contexts."""
+        return self._sweep_variational_core(key, nsweeps, spins, model)[0]
+
+    @eqx.filter_jit
+    def _sweep_variational_core(
+        self,
+        key: Key,
+        nsweeps: ArrayLike,
+        spins: jax.Array,
+        model: Callable,
+        contexts: jax.Array | None = None,
+        propose_fn: Callable | None = None,
+    ) -> tuple[Samples, jax.Array]:
         """
         The whole loop of rounds of `_sweep_host` run on the device in a single
         jitted call, for `~quantax.state.Variational` states.
@@ -284,7 +297,12 @@ class Metropolis(Sampler):
         assert isinstance(state, Variational)
         use_ref = self.use_ref
 
-        if use_ref:
+        if contexts is not None:
+            if use_ref:
+                raise ValueError("Dynamic-context reference sampling is not supported")
+            psi = getattr(state, "_context_forward")(model, spins, contexts)
+            state_internal = None
+        elif use_ref:
             psi, state_internal = state._init_internal(model, spins)
         else:
             psi = state._fulljit_forward(model, spins)
@@ -292,7 +310,10 @@ class Metropolis(Sampler):
         samples = Samples(spins, psi, state_internal)
 
         def forward(new_spins: jax.Array, samples: Samples) -> Samples:
-            if use_ref:
+            if contexts is not None:
+                psi = getattr(state, "_context_forward")(model, new_spins, contexts)
+                return Samples(new_spins, psi)
+            elif use_ref:
                 new_psi, state_internal = state._ref_forward(
                     model,
                     new_spins,
@@ -313,23 +334,37 @@ class Metropolis(Sampler):
             return ~done
 
         def round_body(carry):
-            key, samples, steps, done = carry
+            key, samples, steps, done, accepted = carry
+            old_steps = steps
+            old_spins = samples.spins
             key, new_spins, ratio, steps, done = self._propose_free_steps(
-                key, samples.spins, steps, nsweeps
+                key, old_spins, steps, nsweeps, propose_fn
             )
+            pending = jnp.any(new_spins != old_spins, axis=1).astype(steps.dtype)
             new_samples = forward(new_spins, samples)
             key, samples = self._update(key, ratio, samples, new_samples)
-            return key, samples, steps, done
+            moved = jnp.any(samples.spins != old_spins, axis=1).astype(steps.dtype)
+            # Unchanged proposals count as accepted free steps, exactly as in
+            # native step accounting. Rejected changed proposals are not accepted.
+            accepted = accepted + (steps - old_steps - pending) + moved
+            return key, samples, steps, done, accepted
 
         done = jnp.all(steps >= nsweeps)  # only for nsweeps <= 0
-        carry = (key, samples, steps, done)
-        key, samples, steps, done = jax.lax.while_loop(round_cond, round_body, carry)
+        carry = (key, samples, steps, done, jnp.zeros_like(steps))
+        key, samples, steps, done, accepted = jax.lax.while_loop(
+            round_cond, round_body, carry
+        )
 
-        return Samples(samples.spins, samples.psi)
+        return Samples(samples.spins, samples.psi), accepted
 
     @eqx.filter_jit
     def _propose_free_steps(
-        self, key: Key, spins: jax.Array, steps: jax.Array, nsweeps: ArrayLike
+        self,
+        key: Key,
+        spins: jax.Array,
+        steps: jax.Array,
+        nsweeps: ArrayLike,
+        propose_fn: Callable | None = None,
     ) -> tuple[Key, jax.Array, jax.Array | None, jax.Array, jax.Array]:
         """
         Draw candidate proposals for every chain and pick the first one that changes
@@ -373,7 +408,13 @@ class Metropolis(Sampler):
         nsweeps = jnp.asarray(nsweeps, steps.dtype)
         key, key_propose = jr.split(key)
 
-        propose = jax.vmap(lambda k: self._propose_spins_and_ratio(k, spins))
+        def one_proposal(k):
+            if propose_fn is None:
+                return self._propose_spins_and_ratio(k, spins)
+            result = propose_fn(k, spins)
+            return result if isinstance(result, tuple) else (result, None)
+
+        propose = jax.vmap(one_proposal)
         candidates, candidate_ratios = propose(jr.split(key_propose, K))
         changed = jnp.any(candidates != spins[None], axis=2)  # (K, nsamples)
         any_changed = jnp.any(changed, axis=0)

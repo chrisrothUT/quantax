@@ -8,7 +8,7 @@ from .family_samples import FamilySamples
 from .common_samplers import LocalFlip, ParticleHop, SpinExchange
 from ..state import Foundation
 from ..global_defs import get_subkeys
-from ..utils import LogArray, to_distributed_array
+from ..utils import to_distributed_array, chunk_map
 
 
 class FamilyMetropolis:
@@ -16,8 +16,8 @@ class FamilyMetropolis:
 
     Arrays are (R,S,Nmodes), with S chains per coupling. Metropolis proposals
     run on the flattened R*S axis, so no loop or static binding is needed per
-    Hamiltonian. A device-side loop performs the requested number of proposal
-    steps. Proposals use Quantax's existing fixed-sector kernels. The default
+    Hamiltonian. Native Metropolis performs no-op skipping and proposal steps
+    inside each forward-sized chain chunk. Proposals use Quantax's existing fixed-sector kernels. The default
     target is |psi(spins|coupling)|^2 at each point, with independent random draws.
     """
 
@@ -63,6 +63,7 @@ class FamilyMetropolis:
             "spin_exchange": SpinExchange,
         }[kind]
         self._proposal = cls(state, nsamples=total, thermal_steps=0, sweep_steps=0)
+        self._engine = self._proposal
         self._contexts = to_distributed_array(
             jnp.repeat(self.couplings, samples_per_coupling, axis=0)
         )
@@ -71,33 +72,11 @@ class FamilyMetropolis:
             self.reset(initial_spins)
         self.acceptance = None
 
-        def logabs(psi):
-            return psi.logabs if isinstance(psi, LogArray) else jnp.log(jnp.abs(psi))
-
         def sweep(network, spins, contexts, key, steps):
-            current = logabs(state._context_forward(network, spins, contexts))
-
-            def body(_, carry):
-                spins, current, key, accepted = carry
-                key, kproposal, kaccept = jax.random.split(key, 3)
-                proposed = self._proposal.propose(kproposal, spins)
-                candidate = logabs(state._context_forward(network, proposed, contexts))
-                logdraw = jnp.log(jax.random.uniform(kaccept, (spins.shape[0],)))
-                accept = jnp.isfinite(candidate) & (logdraw < 2 * (candidate - current))
-                return (
-                    jnp.where(accept[:, None], proposed, spins),
-                    jnp.where(accept, candidate, current),
-                    key,
-                    accepted + accept,
-                )
-
-            spins, _, _, accepted = jax.lax.fori_loop(
-                0,
-                steps,
-                body,
-                (spins, current, key, jnp.zeros(spins.shape[0], dtype=jnp.int32)),
+            samples, accepted = self._engine._sweep_variational_core(
+                key, steps, spins, network, contexts, self._proposal.propose
             )
-            return spins, accepted
+            return samples.spins, accepted
 
         self._sweep = eqx.filter_jit(sweep)
         if thermal_steps:
@@ -135,13 +114,22 @@ class FamilyMetropolis:
         if not isinstance(count, int) or count < 0:
             raise ValueError("Sweep count must be a nonnegative integer")
         if count:
-            self._spins, accepted = self._sweep(
-                self.state.conditional_model,
-                self._spins,
-                self._contexts,
-                get_subkeys(),
-                jnp.asarray(count),
+
+            def partial_sweep(count, spins, contexts):
+                return self._sweep(
+                    self.state.conditional_model,
+                    spins,
+                    contexts,
+                    get_subkeys(),
+                    jnp.asarray(count),
+                )
+
+            # Same loop order as Metropolis.sweep: finish the entire Markov
+            # sweep on each forward-sized chain chunk before advancing the next.
+            fn = chunk_map(
+                partial_sweep, in_axes=(None, 0, 0), chunk_size=self.state.forward_chunk
             )
+            self._spins, accepted = fn(count, self._spins, self._contexts)
             self.acceptance = (
                 accepted.reshape(self.nsystems, self.samples_per_coupling).mean(axis=1)
                 / count

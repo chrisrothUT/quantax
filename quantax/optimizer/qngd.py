@@ -199,14 +199,20 @@ class QNGD:
             eqx.tree_serialise_leaves(file, buffers)
 
 
-@jax.jit
-def _Omat_stats(Omat: jax.Array) -> tuple[jax.Array, jax.Array]:
-    # Reduce-only pass: NaN row count and column mean of the NaN-zeroed matrix.
-    # ``n_nan_rows`` is returned so the caller can warn cheaply (scalar host
-    # transfer).
-    n_nan_rows = jnp.count_nonzero(jnp.any(jnp.isnan(Omat), axis=1))
-    Omean = jnp.mean(jnp.where(jnp.isnan(Omat), 0.0, Omat), axis=0, keepdims=True)
-    return Omean, n_nan_rows
+@partial(jax.jit, static_argnames=("axis", "check_finite"))
+def _Omat_stats(
+    Omat: jax.Array, weights=None, axis=0, check_finite=False
+) -> tuple[jax.Array, jax.Array]:
+    # Native reduction-only statistics. Optional normalized sample weights and a
+    # grouped sample axis support foundation SR without an O-sized temporary.
+    invalid = ~jnp.isfinite(Omat) if check_finite else jnp.isnan(Omat)
+    n_invalid_rows = jnp.count_nonzero(jnp.any(invalid, axis=-1))
+    clean = jnp.where(invalid, 0.0, Omat)
+    if weights is None:
+        Omean = jnp.mean(clean, axis=axis, keepdims=True)
+    else:
+        Omean = jnp.sum(clean * weights[..., None], axis=axis, keepdims=True)
+    return Omean, n_invalid_rows
 
 
 @partial(jax.jit, donate_argnums=0)

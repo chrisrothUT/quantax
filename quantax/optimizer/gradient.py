@@ -38,6 +38,21 @@ def _median_mad_residual(energies, weight, clip, scale_floor):
     return component(energies)
 
 
+def _energy_residual(energies, weight, mean, variance, clip, mode, scale_floor):
+    """Shared native energy clipping before caller-specific centering/weighting."""
+    residual = energies - mean
+    if clip is None:
+        return residual
+    if mode == "median_mad":
+        return _median_mad_residual(energies, weight, clip, scale_floor)
+    radius = clip * jnp.sqrt(variance)
+    if jnp.iscomplexobj(residual):
+        return jnp.clip(residual.real, -radius, radius) + 1j * jnp.clip(
+            residual.imag, -radius, radius
+        )
+    return jnp.clip(residual, -radius, radius)
+
+
 class EnergyGrad:
     r"""
     Energy gradient source defining :math:`\bar \epsilon` from the local energies
@@ -147,22 +162,19 @@ class EnergyGrad:
         Evar = jnp.abs(Eloc - Emean) ** 2
         self._VarE = (jnp.mean(Evar * weight) / norm).real
 
-        if self._clip is not None and self._clip_mode == "median_mad":
-            residual = _median_mad_residual(
-                Eloc, weight, self._clip, self._clip_scale_floor
-            )
-            return residual * jnp.sqrt(weight / samples.nsamples)
-
         if self._clip is not None:
-            sigma = jnp.sqrt(self._VarE)
-            d = Eloc - Emean
-            if jnp.iscomplexobj(Eloc):
-                d_real = jnp.clip(d.real, -self._clip * sigma, self._clip * sigma)
-                d_imag = jnp.clip(d.imag, -self._clip * sigma, self._clip * sigma)
-                d = d_real + 1j * d_imag
-            else:
-                d = jnp.clip(d, -self._clip * sigma, self._clip * sigma)
-            Eloc = Emean + d
+            residual = _energy_residual(
+                Eloc,
+                weight,
+                Emean,
+                self._VarE,
+                self._clip,
+                self._clip_mode,
+                self._clip_scale_floor,
+            )
+            if self._clip_mode == "median_mad":
+                return residual * jnp.sqrt(weight / samples.nsamples)
+            Eloc = Emean + residual
 
         Eloc -= jnp.mean(Eloc)
         Eloc *= jnp.sqrt(weight / samples.nsamples)

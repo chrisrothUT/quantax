@@ -27,6 +27,7 @@ from ..utils import (
     to_distributed_array,
     to_replicated_numpy,
     chunk_map,
+    shmap,
     PsiArray,
 )
 from ..global_defs import PARTICLE_TYPE, get_sites, get_default_dtype
@@ -285,10 +286,169 @@ def _stripe_psi(psi_conn: PsiArray, nsamples: int) -> PsiArray:
     return psi.flatten()
 
 
+@partial(jax.jit, static_argnums=4)
+def _connection_contexts(segment, connected, spins, contexts, psi_needed):
+    """Carry sample context through native connection compaction and padding."""
+    devices = jax.device_count()
+    batch = spins.shape[0] // devices
+    segment = segment.reshape(devices, -1)
+    offset = jnp.arange(devices)[:, None] * batch
+    valid = segment >= offset
+    source = jnp.where(valid, segment, offset)
+    if psi_needed:
+        # Native _get_conn appends original configurations for the denominator.
+        source = source.at[:, -batch:].set(offset + jnp.arange(batch))
+        valid = valid.at[:, -batch:].set(True)
+    source = source.flatten()
+    # Padding must stay in the physical sector even when no hop is allowed.
+    connected = jnp.where(valid.flatten()[:, None], connected, spins[source])
+    return connected, contexts[source]
+
+
+@jax.jit
+def _valid_connection_mask(H_conn):
+    # Input shape is the fixed operator/sample shape, not the valid-hop count.
+    return ~(jnp.isnan(H_conn) | jnp.isclose(H_conn, 0))
+
+
+def _pack_connection_indices(H_conn, tile_size):
+    """Host-side packing; the index buffer capacity is independent of its values."""
+    devices = jax.device_count()
+    valid = to_replicated_numpy(_valid_connection_mask(H_conn)).reshape(devices, -1)
+    capacity = ((valid.shape[1] + tile_size - 1) // tile_size) * tile_size
+    indices = np.full((devices, capacity), -1, dtype=np.int32)
+    count = 0
+    for device, mask in enumerate(valid):
+        selected = np.flatnonzero(mask)
+        indices[device, : selected.size] = selected
+        count = max(count, selected.size)
+    return to_distributed_array(indices.ravel()), (count + tile_size - 1) // tile_size
+
+
+@partial(jax.jit, static_argnums=5)
+def _connection_tile(s_conn, H_conn, s, indices, offset, tile_size):
+    """Gather a fixed-sized tile with a dynamic offset into host-packed indices."""
+    devices = jax.device_count()
+    samples, connections, modes = s_conn.shape
+    local_samples = samples // devices
+    s_conn = s_conn.reshape(devices, -1, modes)
+    H_conn = H_conn.reshape(devices, -1)
+    s = s.reshape(devices, local_samples, modes)
+    indices = indices.reshape(devices, -1)
+
+    def gather(connected, strength, original, index):
+        index = jax.lax.dynamic_slice_in_dim(index, offset, tile_size)
+        valid = index >= 0
+        safe = jnp.maximum(index, 0)
+        segment = jnp.where(valid, safe // connections, -1)
+        connected = jnp.where(valid[:, None], connected[safe], original[0])
+        strength = jnp.where(valid, strength[safe], 0)
+        return segment, connected, strength
+
+    segment, connected, strength = jax.vmap(gather)(s_conn, H_conn, s, indices)
+    segment += jnp.arange(devices)[:, None] * local_samples
+    return segment.ravel(), connected.reshape(-1, modes), strength.ravel()
+
+
+@eqx.filter_jit
+def _compiled_local_energy_tiles(
+    forward_one,
+    model,
+    s,
+    psi,
+    connected,
+    strength,
+    indices,
+    contexts,
+    ntiles,
+    tile_size,
+):
+    """One GPU loop with a dynamic trip count and fixed-size per-device tiles."""
+
+    def local_energy_tiles(
+        model, s, psi, connected, strength, indices, contexts, ntiles
+    ):
+        samples, connections, modes = connected.shape
+        connected = connected.reshape(-1, modes)
+        strength = strength.ravel()
+        dtype = jnp.result_type(get_default_dtype(), strength.dtype)
+
+        def step(tile, total):
+            index = jax.lax.dynamic_slice_in_dim(indices, tile * tile_size, tile_size)
+            valid = index >= 0
+            safe = jnp.maximum(index, 0)
+            segment = safe // connections
+            spins = jnp.where(valid[:, None], connected[safe], s[0])
+            if contexts is None:
+                amplitude = eqx.filter_vmap(forward_one, in_axes=(None, 0, None))(
+                    model, spins, None
+                )
+            else:
+                amplitude = eqx.filter_vmap(forward_one, in_axes=(None, 0, 0))(
+                    model, spins, contexts[segment]
+                )
+            ratio = jnp.asarray(amplitude / psi[segment])
+            values = jnp.where(valid, ratio * strength[safe], 0).astype(dtype)
+            return total + jax.ops.segment_sum(values, segment, samples)
+
+        return jax.lax.fori_loop(0, ntiles, step, jnp.zeros(samples, dtype=dtype))
+
+    return shmap(
+        local_energy_tiles,
+        in_axes=(None, 0, 0, 0, 0, 0, 0, None),
+        out_axes=0,
+    )(model, s, psi, connected, strength, indices, contexts, ntiles)
+
+
+def _direct_local_tiles(state, s, psi, contexts, off_diags, tile_size):
+    """Variable packing stays in Python; GPU kernels see only fixed-sized tiles."""
+    if psi is None:
+        psi = state(s) if contexts is None else getattr(state, "evaluate")(s, contexts)
+    result = _init_Olocx(s.shape[:1], get_default_dtype(), s.sharding)
+    for _, connected, strength in off_diags:
+        indices, ntiles = _pack_connection_indices(strength, tile_size)
+        if hasattr(state, "_forward_one"):
+            model = (
+                getattr(state, "model")
+                if contexts is None
+                else getattr(state, "conditional_model")
+            )
+            result += _compiled_local_energy_tiles(
+                getattr(state, "_forward_one"),
+                model,
+                s,
+                psi,
+                connected,
+                strength,
+                indices,
+                contexts,
+                jnp.asarray(ntiles, jnp.int32),
+                tile_size,
+            )
+            continue
+        for tile in range(ntiles):
+            segment, spins, matrix_elements = _connection_tile(
+                connected,
+                strength,
+                s,
+                indices,
+                jnp.asarray(tile * tile_size, jnp.int32),
+                tile_size,
+            )
+            if contexts is None:
+                amplitudes = state(spins)
+            else:
+                spins, gamma = _connection_contexts(segment, spins, s, contexts, False)
+                amplitudes = getattr(state, "evaluate")(spins, gamma)
+            result += _get_Olocx(psi, segment, amplitudes, matrix_elements)
+    return result
+
+
 def _Oloc(
     state: State,
     samples: Samples | NDArray[np.integer] | jax.Array,
     jax_op_list: list[tuple[dict[str, Any], tuple[OpTermJAX, ...]]],
+    contexts: jax.Array | None = None,
 ) -> jax.Array:
     if not isinstance(samples, Samples):
         samples = Samples(to_distributed_array(samples))
@@ -319,18 +479,29 @@ def _Oloc(
 
     forward_chunk, ref_chunk, use_ref, any_use_ref = _chunk_and_ref(state, off_diags)
 
-    def get_Olocx_terms(samples, off_diags):
+    def get_Olocx_terms(samples, off_diags, contexts):
         s, psi, internal = _check_samples(state, samples, any_use_ref)
+        if not any_use_ref and forward_chunk is not None:
+            return _direct_local_tiles(
+                state, s, psi, contexts, off_diags, forward_chunk
+            )
         Olocx = _init_Olocx(s.shape[:1], get_default_dtype(), s.sharding)
 
         for is_using_ref, (update_mode, s_conn, H_conn) in zip(use_ref, off_diags):
             psi_needed = psi is None
             conn_size = _get_conn_size(H_conn, forward_chunk, psi_needed).item()
+            if conn_size == 0:
+                continue
             segment, s_conn, H_conn = _get_conn(
                 s_conn, H_conn, conn_size, s, psi_needed
             )
 
-            if is_using_ref:
+            if contexts is not None:
+                s_conn, conn_contexts = _connection_contexts(
+                    segment, s_conn, s, contexts, psi_needed
+                )
+                psi_conn = getattr(state, "evaluate")(s_conn, conn_contexts)
+            elif is_using_ref:
                 psi_conn = state.segment_ref_forward(
                     s_conn, s, update_mode, segment, internal
                 )
@@ -344,8 +515,12 @@ def _Oloc(
 
         return Olocx
 
-    get_Olocx_terms = chunk_map(get_Olocx_terms, chunk_size=ref_chunk)
-    Oloc += get_Olocx_terms(samples, off_diags)
+    get_Olocx_terms = chunk_map(
+        get_Olocx_terms,
+        in_axes=(0, 0, None if contexts is None else 0),
+        chunk_size=ref_chunk,
+    )
+    Oloc += get_Olocx_terms(samples, off_diags, contexts)
     return Oloc
 
 
@@ -807,7 +982,11 @@ class Operator:
         return _apply_off_diag(s, self.jax_op_list)
 
     def Oloc(
-        self, state: State, samples: Samples | NDArray[np.integer] | jax.Array
+        self,
+        state: State,
+        samples: Samples | NDArray[np.integer] | jax.Array,
+        *,
+        contexts: jax.Array | None = None,
     ) -> jax.Array:
         r"""
         Computes the local operator
@@ -818,6 +997,11 @@ class Operator:
 
         :param samples:
             A batch of samples :math:`s`
+
+        :param contexts:
+            Optional dynamic context per configuration, shape (samples, couplings),
+            for Foundation-compatible states. Contexts follow source configurations
+            through the same native valid-connection compaction as ordinary states.
 
         :return:
             A 1D jax array :math:`O_\mathrm{loc}(s)`
@@ -830,7 +1014,13 @@ class Operator:
             else:
                 self.apply_update_mode_filter(nflips_filter)
 
-        return _Oloc(state, samples, self.jax_op_list)
+        if contexts is not None:
+            spins = samples.spins if isinstance(samples, Samples) else samples
+            if contexts.ndim != 2 or contexts.shape[0] != spins.shape[0]:
+                raise ValueError("contexts must have one row per configuration")
+            if state.use_ref:
+                raise ValueError("Dynamic-context reference updates are not supported")
+        return _Oloc(state, samples, self.jax_op_list, contexts)
 
     @overload
     def expectation(

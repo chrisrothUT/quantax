@@ -7,8 +7,8 @@ from typing import BinaryIO, cast
 import numpy as np
 import jax
 import jax.numpy as jnp
-from .qngd import QNGD
-from .gradient import EnergyGrad, _median_mad_residual
+from .qngd import QNGD, _Omat_center, _Omat_stats
+from .gradient import EnergyGrad, _energy_residual
 from .updater import Updater
 from .sr import _constrain_norm
 from ..state import Foundation, Variational
@@ -173,7 +173,7 @@ class FoundationSR(QNGD):
                 raise ValueError(
                     "Sample weights must be a real vector matching local energies"
                 )
-            if not bool(jnp.all(jnp.isfinite(E))) or not bool(jnp.all(jnp.isfinite(O))):
+            if not bool(jnp.all(jnp.isfinite(E))):
                 raise FloatingPointError(f"Nonfinite energy/Jacobian in system {index}")
             if (
                 not bool(jnp.all(jnp.isfinite(w) & (w >= 0)))
@@ -184,24 +184,25 @@ class FoundationSR(QNGD):
                     "Sample weights must be finite, nonnegative and have positive sum"
                 )
             w = w / w.sum()
+            Omean, invalid = _Omat_stats(O, w, check_finite=True)
+            if bool(invalid):
+                raise FloatingPointError(f"Nonfinite energy/Jacobian in system {index}")
             Emean = jnp.sum(w * E)
             residual = E - Emean
             energies.append(Emean.real)
             variances.append(jnp.sum(w * abs(residual) ** 2).real)
-            if self._clip is not None:
-                if self._clip_mode == "median_mad":
-                    residual = _median_mad_residual(E, w, self._clip, self._clip_floor)
-                else:
-                    radius = self._clip * jnp.sqrt(variances[-1])
-                    if jnp.iscomplexobj(residual):
-                        residual = jnp.clip(
-                            residual.real, -radius, radius
-                        ) + 1j * jnp.clip(residual.imag, -radius, radius)
-                    else:
-                        residual = jnp.clip(residual, -radius, radius)
+            residual = _energy_residual(
+                E,
+                w,
+                Emean,
+                variances[-1],
+                self._clip,
+                self._clip_mode,
+                self._clip_floor,
+            )
             residual = residual - jnp.sum(w * residual)
             factor = jnp.sqrt(self._weights[index] * w)
-            obars.append((O - jnp.sum(w[:, None] * O, axis=0)) * factor[:, None])
+            obars.append(_Omat_center(O, Omean, factor[:, None]))
             ebars.append(residual * factor)
         self._energies = jnp.stack(energies)
         self._variances = jnp.stack(variances)
@@ -265,31 +266,24 @@ class FoundationSR(QNGD):
             raise ValueError(
                 "Each Hamiltonian needs positive finite total sampling weight"
             )
-        if not bool(jnp.all(jnp.isfinite(E))) or not bool(jnp.all(jnp.isfinite(O))):
+        if not bool(jnp.all(jnp.isfinite(E))):
             raise FloatingPointError("Nonfinite batched local energy/Jacobian")
         w = w / norm
+        Omean, invalid = _Omat_stats(O, w, axis=1, check_finite=True)
+        if bool(invalid):
+            raise FloatingPointError("Nonfinite batched local energy/Jacobian")
         mean = jnp.sum(w * E, axis=1, keepdims=True)
         residual = E - mean
         self._energies = mean[:, 0].real
         self._variances = jnp.sum(w * abs(residual) ** 2, axis=1).real
         self._term_energies = jnp.sum(w[..., None] * terms, axis=1)
-        if self._clip is not None:
-            if self._clip_mode == "median_mad":
-                residual = jax.vmap(
-                    lambda e, weight: _median_mad_residual(
-                        e, weight, self._clip, self._clip_floor
-                    )
-                )(E, w)
-            else:
-                radius = self._clip * jnp.sqrt(self._variances[:, None])
-                if jnp.iscomplexobj(residual):
-                    residual = jnp.clip(residual.real, -radius, radius) + 1j * jnp.clip(
-                        residual.imag, -radius, radius
-                    )
-                else:
-                    residual = jnp.clip(residual, -radius, radius)
+        residual = jax.vmap(
+            lambda e, weight, m, v: _energy_residual(
+                e, weight, m, v, self._clip, self._clip_mode, self._clip_floor
+            )
+        )(E, w, mean[:, 0], self._variances)
         residual -= jnp.sum(w * residual, axis=1, keepdims=True)
         factor = jnp.sqrt(self._weights[:, None] * w)
-        O = (O - jnp.sum(w[..., None] * O, axis=1, keepdims=True)) * factor[..., None]
+        O = _Omat_center(O, Omean, factor[..., None])
         E = residual * factor
         return O.reshape(-1, O.shape[-1]), E.reshape(-1)

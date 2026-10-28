@@ -79,7 +79,7 @@ two real output channels. Inputs follow Quantax's +/-1 occupation convention.
 axes produce their Cartesian product (U first, t_prime second); use
 `cartesian=False` for paired broadcastable inputs. The distinct bond is along
 physical x. `H.local_terms(family, samples)` returns `(R,S,3)` local energies
-from one batched application of the fixed operator basis. `H.combine(terms)`
+from batched native Operator.Oloc applications of the fixed operator basis. `H.combine(terms)`
 forms `(R,S)` Hamiltonian local energies using each row's coefficients. The
 optimizer reports per-point `energies`, `variances` and `term_energies`.
 
@@ -88,9 +88,9 @@ The operator connectivity and compiled kernels are shared; values for different
 wavefunctions are evaluated separately along batch axes. Variances use the
 combined local energies, preserving covariance between hopping and occupancy.
 `HamiltonianFamily(terms, coefficients, couplings)` provides the same mechanism
-for other linearly parameterized models. `sample_chunk` bounds configurations
-per device in each connection batch; Foundation's `max_parallel` bounds neural forward/Jacobian
-chunks. On multiple devices total `R*S` must divide evenly over devices.
+for other linearly parameterized models. `sample_chunk` is retained as a compatibility argument; native forward/ref
+chunk settings now determine local-energy chunk sizes. Foundation's `max_parallel`
+bounds the same neural forward/Jacobian chunks as Variational. On multiple devices total `R*S` must divide evenly over devices.
 
 ## The joint SR equation
 
@@ -161,3 +161,25 @@ check exact energy finite differences, conditional gauge cancellation, ordinary
 single-system SR equivalence, complex outputs, shared views and optimizer
 serialization, and analytic coupling metrics. The small benchmark reports its
 actual variational and held-out errors rather than claiming production accuracy.
+
+## Shared Quantax implementation
+
+Foundation uses Variational's symmetry projection and parameter derivative
+kernels, QNGD's in-place Jacobian centering, and the native clipping helper,
+solver and updater. The necessary ensemble-specific operation is centering
+and weighting within each Hamiltonian before one shared solve.
+
+FamilyMetropolis delegates to Metropolis's same proposal/free-step loop and
+acceptance rule. Each forward-sized chain chunk finishes its full Markov sweep
+before the next chunk; unchanged proposals count as free attempts. Dynamic
+contexts stay attached to their original chains. Existing private proposer
+adapters (including the Organics mixture) remain compatible.
+
+HamiltonianFamily calls the ordinary Operator.Oloc kernel for each fixed basis
+term across all coupling points. Valid connections are compacted before model
+evaluation; contexts follow native source-segment indices. Original amplitudes
+are evaluated once and shared by the basis terms. Only the final coefficient
+combinations differ. Invalid padding stays in the physical sector. There is no
+Python loop over Hamiltonians and no bound model created per grid point.
+
+Direct local-energy evaluation packs valid connection indices on the host. It sends fixed-capacity index buffers to fixed-size GPU gather/forward/reduction tiles, so changing the valid-hop count does not specialize compiled kernels. The three Hubbard basis terms still act on the entire shared sample batch before coefficient combination. Reference-update states retain their existing operator path.

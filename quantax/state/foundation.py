@@ -10,15 +10,14 @@ from ..utils import (
     LogArray,
     PsiArray,
     jit_chunk_vmap,
+    chunk_map,
+    shmap,
+    get_distributed_sharding,
     to_distributed_array,
     array_extend,
     filter_tree_map,
-    tree_fully_flatten,
-    tree_split_cpl,
-    tree_combine_cpl,
 )
-from ..global_defs import get_default_dtype
-from .variational import Variational, VS_TYPE
+from .variational import Variational
 from ..model.foundation import Conditioned, coupling_tuple
 
 
@@ -146,58 +145,39 @@ class Foundation(Variational):
         return self._coupling_size
 
     def _init_context_kernels(self):
-        def projected(network, spin, context):
-            transformed = self.symm.get_symm_spins(spin)
-            amplitudes = jax.vmap(lambda s: network(s, context))(transformed)
-            return self.symm.symmetrize(amplitudes, spin).astype(get_default_dtype())
+        # Mirror Variational's direct/native-jitted split: connected-state batch
+        # lengths vary after compaction, so direct evaluation dispatches only
+        # fixed-sized compiled tiles rather than specializing a whole scan per size.
+        batch = eqx.filter_jit(
+            shmap(
+                eqx.filter_vmap(self._forward_one, in_axes=(None, 0, 0)),
+                in_axes=(None, 0, 0),
+                out_axes=0,
+            )
+        )
 
-        def derivative(network, spin, context):
-            params, static = eqx.partition(network, eqx.is_inexact_array)
+        def forward_batch(model, spins, contexts):
+            sharding = get_distributed_sharding()
+            return batch(
+                model,
+                jax.device_put(spins, sharding),
+                jax.device_put(contexts, sharding),
+            )
 
-            def surrogate(params):
-                psi = projected(eqx.combine(params, static), spin, context)
-                if isinstance(psi, LogArray):
-                    return psi.sign / jax.lax.stop_gradient(psi.sign) + psi.logabs
-                return psi / jax.lax.stop_gradient(psi)
-
-            if self.vs_type == VS_TYPE.real_or_holomorphic:
-                gradient = jax.grad(surrogate, holomorphic=self.holomorphic)(params)
-                result = tree_fully_flatten(gradient)
-            elif self.vs_type == VS_TYPE.real_to_complex:
-                real = jax.grad(lambda p: surrogate(p).real)(params)
-                imag = jax.grad(lambda p: surrogate(p).imag)(params)
-                result = jax.lax.complex(
-                    tree_fully_flatten(real), tree_fully_flatten(imag)
-                )
-            else:
-                real, imag = tree_split_cpl(params)
-                combined = lambda r, i: surrogate(tree_combine_cpl(r, i))
-                dr = jax.grad(lambda r, i: combined(r, i).real, argnums=(0, 1))(
-                    real, imag
-                )
-                di = jax.grad(lambda r, i: combined(r, i).imag, argnums=(0, 1))(
-                    real, imag
-                )
-                result = jnp.concatenate(
-                    [
-                        jax.lax.complex(
-                            tree_fully_flatten(dr[0]), tree_fully_flatten(di[0])
-                        ),
-                        jax.lax.complex(
-                            tree_fully_flatten(dr[1]), tree_fully_flatten(di[1])
-                        ),
-                    ]
-                )
-            return result.astype(get_default_dtype())
-
+        self._context_direct_forward = chunk_map(
+            forward_batch,
+            in_axes=(None, 0, 0),
+            chunk_size=self.forward_chunk,
+            atleast_1chunk=True,
+        )
         self._context_forward = jit_chunk_vmap(
-            projected,
+            self._forward_one,
             in_axes=(None, 0, 0),
             chunk_size=self.forward_chunk,
             shard_batch=True,
         )
         self._context_jacobian = jit_chunk_vmap(
-            derivative,
+            self._log_derivative_one,
             in_axes=(None, 0, 0),
             chunk_size=self.backward_chunk,
             shard_batch=True,
@@ -238,7 +218,7 @@ class Foundation(Variational):
         count = spins.shape[0]
         spins = to_distributed_array(array_extend(spins, jax.device_count()))
         context = to_distributed_array(array_extend(context, jax.device_count()))
-        out = self._context_forward(self.conditional_model, spins, context)
+        out = self._context_direct_forward(self.conditional_model, spins, context)
         return filter_tree_map(lambda x: x[:count].reshape(shape), out)
 
     def jacobian_at(self, spins, couplings) -> jax.Array:
