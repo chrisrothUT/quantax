@@ -76,7 +76,7 @@ def main():
     H = SquareTwistHubbard(U, tp, sample_chunk=4)
     model = ConditionalPfaffian(channels=channels, d=d, nblocks=blocks)
     state = qtx.state.Foundation(model, H.couplings[0], max_parallel=(1024, 128, 1024))
-    S = 4 if args.smoke else 20
+    S = 4 if args.smoke else 10
     total = len(H) * S
     config = dict(
         geometry="Square",
@@ -182,7 +182,16 @@ def main():
             ),
         )
         with np.load(directory / "sampler.npz") as z:
-            sampler.reset(z["spins"])
+            saved_spins = z["spins"]
+            if (
+                not args.smoke
+                and saved_spins.shape == (len(H), 20, lat.Nmodes)
+                and S == 10
+            ):
+                # User-requested reduction: retain ten warmed chains per coupling.
+                saved_spins = saved_spins[:, :S, :]
+                print("RESUME: retaining 10 of 20 chains per coupling", flush=True)
+            sampler.reset(saved_spins)
             global_defs.KEY = qtx.utils.local_to_replicated(
                 jax.random.wrap_key_data(jnp.asarray(z["rng"], dtype=jnp.uint32))
             )

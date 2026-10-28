@@ -3,7 +3,7 @@
 6x6 periodic square lattice, t=1, U=4, 30 electrons (15 up, 15 down),
 1/6 hole doping relative to half filling. Two conditioning axes are total
 boundary twists theta_x and theta_y, in radians. Each uses 20 equally spaced
-values in [0, 2pi), for 400 Hamiltonians and 20 samples each (8,000 total).
+values in [0, 2pi), for 400 Hamiltonians and 10 samples each (4,000 total).
 Uniform Peierls phases exp(i theta_axis/6) preserve translation symmetry;
 there is no magnetic flux through individual plaquettes.
 
