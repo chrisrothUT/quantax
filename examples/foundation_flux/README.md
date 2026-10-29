@@ -27,3 +27,19 @@ Raw sample blocks and per-coupling energies are saved each iteration.
 CPU validation: run validate_hamiltonian.py to compare the hopping spectra to
 analytic twisted one-particle energies. run_training.py --smoke --iterations 2
 checks complex-amplitude training; --smoke --resume --iterations 3 checks restart.
+
+## Large-gauge momentum check
+
+For the implemented forward hopping -exp(i theta_a/L), define
+U_a = exp(i 2pi/L sum_r r_a n_r) and physical positive translation
+T_a cdag_r T_a^-1 = cdag_(r+a). Then H(theta+2pi e_a)=U_a H(theta) U_a^dagger.
+With T_a Psi=exp(i q_a) Psi, the mapped sector is q_a-2pi*N_e/L.
+Here N_e=30 and L=6, so this shift is -10pi, zero modulo 2pi.
+Thus the q=0 spectrum itself is 2pi periodic at this filling. The sectors
+q=+/- (pi/3,pi/3) are distinct comparisons, not its large-gauge partners.
+The symmetric factor currently exponentiates a translation-invariant sum;
+Fourier weighting that log-amplitude does not create a momentum eigenstate.
+
+Run `validate_gauge_momentum.py` on CPU with JAX x64 enabled. It checks the
+native model's physical translation eigenvalue (including Fock permutation
+signs), gauge phase under translation, and all forward bonds including wraps.
