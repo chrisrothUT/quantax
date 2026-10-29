@@ -43,3 +43,20 @@ Fourier weighting that log-amplitude does not create a momentum eigenstate.
 Run `validate_gauge_momentum.py` on CPU with JAX x64 enabled. It checks the
 native model's physical translation eigenvalue (including Fock permutation
 signs), gauge phase under translation, and all forward bonds including wraps.
+
+## Launcher and diagnostics notebook
+
+`run_training.py` is the training entry point. `train.sbatch` is the exact
+two-H100 launcher used for this twist calculation, including preflight,
+training/restart smoke checks, and checkpoint continuation. Its paths, Python
+environment, and Slurm settings describe the original cluster; adapt them
+for your checkout and working directory before submitting. Create `logs/`
+in that working directory before calling `sbatch`.
+
+Open `foundation_flux_diagnostics.ipynb` to inspect the saved twist results.
+It includes the recorded plots. To refresh them, set `FOUNDATION_RUN_DIR`
+in the notebook kernel environment to the training working directory
+(the directory containing `run/`), then run all cells. By default it uses
+the notebook working directory. Figures and selected raw correlation blocks
+are written to `analysis/` there. Checkpoints and raw training data are
+kept outside this repository.
